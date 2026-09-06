@@ -1,0 +1,39 @@
+resources:
+  apps:
+    api:
+      name: delu-api-${bundle.target}
+      description: DELU website with forecasts, market history, metrics, and downloads.
+      source_code_path: ../app
+      resources:
+        - name: warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+        - name: gold_table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.gold.model_input
+            permission: SELECT
+        - name: forecast_table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.gold.forecasts
+            permission: SELECT
+        - name: forecast_run_table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.gold.forecast_runs
+            permission: SELECT
+        - name: metrics_table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.gold.forecast_metrics
+            permission: SELECT
+        - name: model_exports
+          uc_securable:
+            securable_type: VOLUME
+            securable_full_name: ${var.catalog}.gold.${var.model_export_volume}
+            permission: READ_VOLUME
+      permissions:
+        - level: CAN_USE
+          user_name: ${workspace.current_user.userName}

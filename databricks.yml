@@ -1,0 +1,49 @@
+bundle:
+  name: delu
+
+include:
+  - resources/*.yml
+
+sync:
+  include:
+    - app/static/**
+  exclude:
+    - frontend/**
+
+artifacts:
+  python_artifact:
+    type: whl
+    build: uv build --wheel
+    path: .
+
+variables:
+  catalog:
+    default: delu
+  warehouse_id:
+    lookup:
+      warehouse: Serverless Starter Warehouse
+  model_export_volume:
+    default: model_exports
+  schedule_pause_status:
+    default: PAUSED
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      profile: bhanu prasanna
+    variables:
+      model_export_volume: model_exports_dev
+      schedule_pause_status: PAUSED
+
+  prod:
+    mode: production
+    workspace:
+      profile: bhanu prasanna
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      user_name: ${workspace.current_user.userName}
+    variables:
+      model_export_volume: model_exports
+      schedule_pause_status: UNPAUSED

@@ -1,0 +1,8 @@
+resources:
+  volumes:
+    model_exports:
+      catalog_name: ${var.catalog}
+      schema_name: gold
+      name: ${var.model_export_volume}
+      volume_type: MANAGED
+      comment: Versioned production-model downloads for the DELU application.

@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# macos
+.DS_Store
+
+# secrets
+.env
+
+# test
+.coverage
+
+# Local data and experiment artifacts
+data/
+artifacts/
+mlflow.db
+
+# Web dependencies and generated assets
+node_modules/
+app/static/
+test-results/
+playwright-report/

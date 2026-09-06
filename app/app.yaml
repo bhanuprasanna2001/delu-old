@@ -1,0 +1,17 @@
+command:
+  - python
+  - run.py
+
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: warehouse
+  - name: DELU_GOLD_TABLE
+    valueFrom: gold_table
+  - name: DELU_FORECAST_TABLE
+    valueFrom: forecast_table
+  - name: DELU_FORECAST_RUN_TABLE
+    valueFrom: forecast_run_table
+  - name: DELU_METRICS_TABLE
+    valueFrom: metrics_table
+  - name: DELU_MODEL_VOLUME
+    valueFrom: model_exports

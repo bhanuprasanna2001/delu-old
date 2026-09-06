@@ -1,0 +1,40 @@
+resources:
+  jobs:
+    monthly_training:
+      name: delu-monthly-training
+      description: Train through the prior month, evaluate, register, and promote safely.
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+      schedule:
+        quartz_cron_expression: "0 0 6 3 * ?"
+        timezone_id: Europe/Berlin
+        pause_status: ${var.schedule_pause_status}
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 14400
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
+        on_duration_warning_threshold_exceeded:
+          - ${workspace.current_user.userName}
+      environments:
+        - environment_key: ml
+          spec:
+            client: "4"
+            dependencies:
+              - ../dist/*.whl
+      tasks:
+        - task_key: train
+          environment_key: ml
+          timeout_seconds: 21600
+          max_retries: 1
+          min_retry_interval_millis: 600000
+          python_wheel_task:
+            package_name: delu
+            entry_point: delu-train
+            parameters:
+              - --model-export-dir
+              - /Volumes/${var.catalog}/gold/${resources.volumes.model_exports.name}
