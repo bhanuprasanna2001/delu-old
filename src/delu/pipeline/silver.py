@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import xml.etree.ElementTree as ET
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from typing import cast
 
@@ -19,7 +20,16 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-from delu.pipeline.bronze import ALL, BERLIN, EXAA, SDAC
+from delu.pipeline.bronze import (
+    ALL,
+    BERLIN,
+    EXAA,
+    SDAC,
+    WEATHER_FALLBACK_MODEL,
+    WEATHER_FIELDS,
+    WEATHER_LOCATIONS,
+    WEATHER_MODEL,
+)
 from delu.pipeline.bronze import TABLE as BRONZE_TABLE
 
 TABLE = "delu.silver.measurements"
@@ -198,6 +208,187 @@ def parse_payload(
         ) from exc
 
 
+def _weather_value(
+    field: str,
+    primary: object,
+    fallback: object,
+    valid_time: datetime,
+    run_start: datetime,
+) -> float:
+    value = primary
+    if value is None and field == "temperature_2m":
+        value = fallback
+    if value is None and field == "shortwave_radiation" and valid_time == run_start:
+        value = 0.0
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"Weather {field} contains an unexpected null or value")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"Weather {field} contains a non-finite value")
+    return result
+
+
+def _weather_times(raw: object, run_start: datetime) -> list[datetime]:
+    if not isinstance(raw, list) or len(raw) != 48:
+        raise ValueError("Weather response must contain 48 hourly timestamps")
+    try:
+        values = [datetime.fromisoformat(value) for value in raw]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Weather response contains an invalid timestamp") from exc
+    values = [
+        value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        for value in values
+    ]
+    expected = [run_start + timedelta(hours=offset) for offset in range(48)]
+    if values != expected:
+        raise ValueError("Weather response must contain 48 consecutive run hours")
+    return values
+
+
+def _weather_location(
+    raw: object,
+    location_id: str,
+    expected_latitude: float,
+    expected_longitude: float,
+    run_start: datetime,
+) -> tuple[Mapping[str, object], Mapping[str, object], list[datetime]]:
+    if not isinstance(raw, Mapping):
+        raise ValueError("Each weather location must be an object")
+    if raw.get("timezone") != "GMT" or raw.get("utc_offset_seconds") != 0:
+        raise ValueError("Weather timestamps must use GMT")
+    units = raw.get("hourly_units")
+    hourly = raw.get("hourly")
+    if not isinstance(units, Mapping) or not isinstance(hourly, Mapping):
+        raise ValueError("Weather hourly values and units must be objects")
+    if units.get("time") != "iso8601":
+        raise ValueError("Weather timestamps must use ISO 8601")
+    try:
+        latitude = float(raw["latitude"])
+        longitude = float(raw["longitude"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Weather response contains invalid coordinates") from exc
+    if (
+        abs(latitude - expected_latitude) > 0.25
+        or abs(longitude - expected_longitude) > 0.25
+    ):
+        raise ValueError(f"Weather location order changed at {location_id}")
+    return units, hourly, _weather_times(hourly.get("time"), run_start)
+
+
+def _parse_weather_payload(
+    payload: str,
+    run_date: date,
+    cell: str,
+) -> list[tuple[date, datetime, str, float, str]]:
+    """Parse one weather cell response into next-day location series."""
+    locations = [location for location in WEATHER_LOCATIONS if location[3] == cell]
+    try:
+        decoded = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid weather JSON for {run_date} {cell}") from exc
+    if isinstance(decoded, Mapping):
+        data = decoded.get("primary")
+        fallback_data = decoded.get("temperature_fallback")
+    else:
+        data = decoded
+        fallback_data = None
+    if not isinstance(data, list) or len(data) != len(locations):
+        raise ValueError(
+            f"Expected {len(locations)} weather locations for {cell}, "
+            f"found {len(data) if isinstance(data, list) else 'a non-list response'}"
+        )
+    if fallback_data is not None and (
+        not isinstance(fallback_data, list) or len(fallback_data) != len(locations)
+    ):
+        raise ValueError("Weather temperature fallback has the wrong location count")
+
+    run_start = datetime.combine(run_date, time.min, UTC)
+    delivery_date = run_date + timedelta(days=1)
+    rows = []
+    fallback_locations = fallback_data or [None] * len(locations)
+    for raw, fallback_raw, location in zip(
+        data, fallback_locations, locations, strict=True
+    ):
+        location_id, expected_latitude, expected_longitude, _ = location
+        units, hourly, valid_times = _weather_location(
+            raw,
+            location_id,
+            expected_latitude,
+            expected_longitude,
+            run_start,
+        )
+        separate_fallback = None
+        if fallback_raw is not None:
+            fallback_units, fallback_hourly, _ = _weather_location(
+                fallback_raw,
+                location_id,
+                expected_latitude,
+                expected_longitude,
+                run_start,
+            )
+            separate_fallback = fallback_hourly.get("temperature_2m")
+            if (
+                not isinstance(separate_fallback, list)
+                or len(separate_fallback) != 48
+                or fallback_units.get("temperature_2m") != "°C"
+            ):
+                raise ValueError(
+                    "Weather temperature fallback must contain 48 values in °C"
+                )
+        for field, _, unit in WEATHER_FIELDS:
+            primary_name = f"{field}_{WEATHER_MODEL}"
+            if primary_name not in hourly:
+                primary_name = field
+            primary = hourly.get(primary_name)
+            fallback_name = f"{field}_{WEATHER_FALLBACK_MODEL}"
+            uses_separate_fallback = (
+                field == "temperature_2m" and separate_fallback is not None
+            )
+            fallback = (
+                separate_fallback
+                if uses_separate_fallback
+                else hourly.get(fallback_name)
+            )
+            if not isinstance(primary, list) or len(primary) != 48:
+                raise ValueError(f"Weather {field} must contain 48 hourly values")
+            if units.get(primary_name) != unit:
+                raise ValueError(f"Weather {field} has an unexpected unit")
+            if fallback is not None and (
+                not isinstance(fallback, list) or len(fallback) != 48
+            ):
+                raise ValueError(f"Weather fallback {field} must contain 48 values")
+            if (
+                fallback is not None
+                and not uses_separate_fallback
+                and units.get(fallback_name) != unit
+            ):
+                raise ValueError(f"Weather fallback {field} has an unexpected unit")
+            values = [
+                _weather_value(
+                    field,
+                    value,
+                    None if fallback is None else fallback[index],
+                    valid_time,
+                    run_start,
+                )
+                for index, (valid_time, value) in enumerate(
+                    zip(valid_times, primary, strict=True)
+                )
+            ]
+            rows.extend(
+                (
+                    delivery_date,
+                    valid_time,
+                    f"weather.{location_id}.{field}",
+                    value,
+                    unit,
+                )
+                for valid_time, value in zip(valid_times, values, strict=True)
+                if valid_time.astimezone(BERLIN).date() == delivery_date
+            )
+    return rows
+
+
 def _validate_raw(raw: DataFrame) -> None:
     columns = ("delivery_date", "series", "payload", "ingested_at")
     stats = raw.agg(
@@ -222,6 +413,16 @@ def _parse_rows(
 ) -> list[tuple[date, datetime, str, float, str, datetime]]:
     parsed = []
     for delivery_date, series, payload, ingested_at in rows:
+        if series.startswith(f"weather.{WEATHER_MODEL}."):
+            parsed.extend(
+                (*row, ingested_at)
+                for row in _parse_weather_payload(
+                    payload,
+                    delivery_date,
+                    series.rsplit(".", 1)[-1],
+                )
+            )
+            continue
         unit = "EUR/MWh" if series in PRICE_SERIES else "MW"
         parsed.extend(
             (

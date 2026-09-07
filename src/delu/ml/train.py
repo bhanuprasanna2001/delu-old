@@ -93,6 +93,9 @@ def _load_production_metrics(
     model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}@prod")
     if not isinstance(model, ConformalPriceForecaster):
         raise TypeError("The production model has an incompatible Python type")
+    if model.feature_count != test.features.shape[-1]:
+        LOGGER.warning("Skipping production comparison after a feature schema change")
+        return None
     return version.version, _metrics(model, test)
 
 

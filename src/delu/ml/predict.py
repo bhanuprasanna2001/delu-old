@@ -44,9 +44,7 @@ def _dates_to_forecast(
 ) -> tuple[date, ...]:
     if start > end:
         raise ValueError("forecast start cannot be after end")
-    dates = (
-        start + timedelta(days=offset) for offset in range((end - start).days + 1)
-    )
+    dates = (start + timedelta(days=offset) for offset in range((end - start).days + 1))
     missing = [
         delivery_date for delivery_date in dates if delivery_date not in complete
     ]
@@ -90,9 +88,9 @@ def _complete_forecast_dates(
         .groupBy("delivery_date")
         .agg(
             F.count("*").alias("rows"),
-            F.countDistinct(
-                F.when(valid_interval, F.col("quarter_of_day"))
-            ).alias("valid_quarters"),
+            F.countDistinct(F.when(valid_interval, F.col("quarter_of_day"))).alias(
+                "valid_quarters"
+            ),
             F.countDistinct("model_version").alias("model_versions"),
             F.first("model_version").alias("model_version"),
         )

@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from delu.pipeline.gold import WEATHER_FEATURES
+
 QUARTERS_PER_DAY = 96
 TARGET_COLUMN = "price_de_lu_sdac_eur_per_mwh"
 BASELINE_COLUMN = "price_de_lu_exaa_eur_per_mwh"
@@ -29,6 +31,7 @@ NUMERIC_FEATURES = (
     "wind_onshore_actual_d_minus_2_mw",
     "wind_offshore_actual_d_minus_2_mw",
     "residual_load_actual_d_minus_2_mw",
+    *WEATHER_FEATURES,
 )
 BOOLEAN_FEATURES = (
     "is_weekend",

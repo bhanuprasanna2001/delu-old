@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import random
@@ -26,6 +27,43 @@ TABLE = "delu.bronze.raw"
 SCHEMA = "delivery_date date, series string, payload string, ingested_at timestamp"
 DEFAULT_START = date(2025, 10, 1)
 BERLIN = ZoneInfo("Europe/Berlin")
+WEATHER_URL = "https://single-runs-api.open-meteo.com/v1/forecast"
+WEATHER_MODEL = "ecmwf_ifs"
+WEATHER_FALLBACK_MODEL = "ecmwf_ifs025"
+WEATHER_FIELDS = (
+    ("temperature_2m", "temperature_2m_c", "°C"),
+    ("wind_speed_100m", "wind_speed_100m_m_s", "m/s"),
+    ("wind_direction_100m", "wind_direction_100m_degrees", "°"),
+    ("shortwave_radiation", "shortwave_radiation_w_m2", "W/m²"),
+    ("cloud_cover", "cloud_cover_pct", "%"),
+)
+WEATHER_LOCATIONS = (
+    ("emden", 53.37, 7.21, "land"),
+    ("bremen", 53.08, 8.80, "land"),
+    ("hamburg", 53.55, 9.99, "land"),
+    ("kiel", 54.32, 10.14, "land"),
+    ("rostock", 54.09, 12.14, "land"),
+    ("hanover", 52.38, 9.73, "land"),
+    ("berlin", 52.52, 13.41, "land"),
+    ("muenster", 51.96, 7.63, "land"),
+    ("kassel", 51.31, 9.50, "land"),
+    ("leipzig", 51.34, 12.37, "land"),
+    ("dresden", 51.05, 13.74, "land"),
+    ("cologne", 50.94, 6.96, "land"),
+    ("frankfurt", 50.11, 8.68, "land"),
+    ("erfurt", 50.98, 11.03, "land"),
+    ("nuremberg", 49.45, 11.08, "land"),
+    ("luxembourg", 49.61, 6.13, "land"),
+    ("stuttgart", 48.78, 9.18, "land"),
+    ("freiburg", 47.99, 7.85, "land"),
+    ("munich", 48.14, 11.58, "land"),
+    ("passau", 48.57, 13.46, "land"),
+    ("north_sea_west", 54.75, 6.30, "sea"),
+    ("north_sea_centre", 54.60, 7.50, "sea"),
+    ("north_sea_east", 54.40, 8.40, "sea"),
+    ("baltic_west", 54.50, 11.30, "sea"),
+    ("baltic_east", 54.50, 13.50, "sea"),
+)
 WORKERS = 12
 BATCH_DAYS = 7
 LOGGER = logging.getLogger(__name__)
@@ -75,6 +113,69 @@ ACTUAL: tuple[Request, ...] = (
     ),
 )
 ALL: tuple[Request, ...] = SDAC + EXAA + FORECAST + ACTUAL
+WEATHER: tuple[Request, ...] = tuple(
+    (f"weather.{WEATHER_MODEL}.{cell}", "weather", cell, {}) for cell in ("land", "sea")
+)
+
+
+def _latest_weather_run(now: datetime) -> date:
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    local = now.astimezone(BERLIN)
+    return local.date() - timedelta(days=local.hour < 9)
+
+
+def _weather_parameters(cell: str, run_date: date, model: str) -> dict[str, str]:
+    locations = [location for location in WEATHER_LOCATIONS if location[3] == cell]
+    return {
+        "latitude": ",".join(str(location[1]) for location in locations),
+        "longitude": ",".join(str(location[2]) for location in locations),
+        "hourly": (
+            "temperature_2m"
+            if model == WEATHER_FALLBACK_MODEL
+            else ",".join(field for field, _, _ in WEATHER_FIELDS)
+        ),
+        "models": model,
+        "run": f"{run_date.isoformat()}T00:00",
+        "forecast_days": "2",
+        "timezone": "GMT",
+        "wind_speed_unit": "ms",
+        "cell_selection": cell,
+    }
+
+
+def _fetch_weather(cell: str, run_date: date) -> str:
+    response = requests.get(
+        WEATHER_URL,
+        params=_weather_parameters(cell, run_date, WEATHER_MODEL),
+        headers={"Accept": "application/json"},
+        timeout=60,
+    )
+    response.raise_for_status()
+    primary = response.json()
+    if not isinstance(primary, list):
+        raise ValueError("Weather response must be a list of locations")
+    try:
+        needs_fallback = any(
+            None in location["hourly"]["temperature_2m"] for location in primary
+        )
+    except (KeyError, TypeError) as exc:
+        raise ValueError("Weather response has no hourly temperature data") from exc
+
+    fallback = None
+    if needs_fallback:
+        response = requests.get(
+            WEATHER_URL,
+            params=_weather_parameters(cell, run_date, WEATHER_FALLBACK_MODEL),
+            headers={"Accept": "application/json"},
+            timeout=60,
+        )
+        response.raise_for_status()
+        fallback = response.json()
+    return json.dumps(
+        {"primary": primary, "temperature_fallback": fallback},
+        separators=(",", ":"),
+    )
 
 
 def _planned_requests(
@@ -82,10 +183,12 @@ def _planned_requests(
     *,
     today: date,
     start: date,
+    weather_run_date: date | None = None,
 ) -> tuple[
     list[PlannedRequest],
     set[RequestKey],
 ]:
+    weather_run_date = today if weather_run_date is None else weather_run_date
     if mode == "morning":
         first_delivery_date = today.replace(day=1)
         final_delivery_date = today + timedelta(days=1)
@@ -103,7 +206,8 @@ def _planned_requests(
                     *((delivery_date - timedelta(days=1), *item) for item in FORECAST),
                     *((delivery_date - timedelta(days=2), *item) for item in ACTUAL),
                 )
-            ],
+            ]
+            + [(weather_run_date, *request) for request in WEATHER],
             set(),
         )
     if mode == "settlement":
@@ -124,6 +228,12 @@ def _planned_requests(
             for delivery_date, series, *_ in planned
             if delivery_date in refresh_days
         }
+        planned.extend(
+            (run_date, *request)
+            for offset in range(max(0, (weather_run_date - start).days + 1))
+            for run_date in (start + timedelta(days=offset),)
+            for request in WEATHER
+        )
         return planned, refresh
     raise ValueError("mode must be full, morning, or settlement")
 
@@ -152,8 +262,13 @@ def ingest(
     if not spark.catalog.tableExists(TABLE):
         spark.createDataFrame([], SCHEMA).write.format("delta").saveAsTable(TABLE)
 
-    # Each item is (delivery_date, series, entsoe-py method, area, method kwargs).
-    planned, refresh = _planned_requests(mode, today=today, start=start)
+    # Each item is (delivery date or run date, series, method, area, method kwargs).
+    planned, refresh = _planned_requests(
+        mode,
+        today=today,
+        start=start,
+        weather_run_date=_latest_weather_run(current),
+    )
 
     if not planned:
         LOGGER.info("Nothing new to ingest.")
@@ -181,20 +296,28 @@ def ingest(
         LOGGER.info("Nothing new to ingest.")
         return 0
 
-    api_key = os.getenv("ENTSOE_API_KEY") or DBUtils(spark).secrets.get(
-        scope="delu", key="entsoe-api-key"
-    )
+    api_key = None
+    if any(method != "weather" for _, _, method, _, _ in planned):
+        api_key = os.getenv("ENTSOE_API_KEY") or DBUtils(spark).secrets.get(
+            scope="delu", key="entsoe-api-key"
+        )
 
     def fetch(
         request: PlannedRequest,
     ) -> tuple[date, str, str]:
         delivery_date, series, method, area, params = request
-        client = EntsoeRawClient(api_key, retry_count=1, retry_delay=0, timeout=60)
         period_start = pd.Timestamp(delivery_date, tz=BERLIN)
         period_end = pd.Timestamp(delivery_date + timedelta(days=1), tz=BERLIN)
 
         for attempt in range(4):
             try:
+                if method == "weather":
+                    return delivery_date, series, _fetch_weather(area, delivery_date)
+                if api_key is None:
+                    raise RuntimeError("ENTSO-E API key is unavailable")
+                client = EntsoeRawClient(
+                    api_key, retry_count=1, retry_delay=0, timeout=60
+                )
                 payload = getattr(client, method)(
                     area, period_start, period_end, **params
                 )
@@ -229,7 +352,7 @@ def ingest(
     for dates in batched(sorted({request[0] for request in planned}), BATCH_DAYS):
         batch = [request for request in planned if request[0] in dates]
         LOGGER.info(
-            "Fetching %d ENTSO-E responses for %s through %s with %d workers.",
+            "Fetching %d source responses for %s through %s with %d workers.",
             len(batch),
             dates[0],
             dates[-1],

@@ -133,5 +133,6 @@ and the pull request workflow. Browser tests use fixtures and can run without
 Databricks credentials.
 
 Built with React, Vite, TypeScript, Tailwind CSS, FastAPI, and Databricks.
-Market data comes from [ENTSO-E](https://transparency.entsoe.eu/), with holiday
-data from [OpenHolidays](https://www.openholidaysapi.org/).
+Market data comes from [ENTSO-E](https://transparency.entsoe.eu/), weather data
+from [Open-Meteo](https://open-meteo.com/), and holiday data from
+[OpenHolidays](https://www.openholidaysapi.org/).

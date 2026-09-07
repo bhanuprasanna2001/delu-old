@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 from zipfile import ZipFile
 
 import numpy as np
 
 from delu.ml.data import DailyData
-from delu.ml.model import BoostingConfig
-from delu.ml.train import _export_model_archive
+from delu.ml.model import BoostingConfig, ConformalPriceForecaster
+from delu.ml.train import _export_model_archive, _load_production_metrics
 from delu.ml.training import fit_model, select_point_shrinkage
 
 FAST_CONFIG = BoostingConfig(
@@ -59,6 +60,17 @@ def test_select_point_shrinkage_minimizes_out_of_fold_mae() -> None:
     shrinkage = select_point_shrinkage(corrections, residuals)
 
     assert shrinkage == 0.5
+
+
+def test_incompatible_production_model_is_skipped_during_migration(monkeypatch) -> None:
+    client = MagicMock()
+    client.get_model_version_by_alias.return_value.version = "1"
+    old_model = ConformalPriceForecaster(feature_count=2, reference_feature_index=0)
+    monkeypatch.setattr("delu.ml.train.mlflow.sklearn.load_model", lambda _: old_model)
+
+    production = _load_production_metrics(client, daily_data(5, 3))
+
+    assert production is None
 
 
 def test_model_export_is_a_versioned_mlflow_archive(

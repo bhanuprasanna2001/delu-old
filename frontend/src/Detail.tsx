@@ -68,8 +68,8 @@ export default function Detail({ day, forecast, points, features, featuresError,
         <div className="download-panel dataset-panel">
           <div className="flex items-start justify-between gap-4"><span className="download-icon"><Database size={20} strokeWidth={1.4} /></span><span className="small-tag">Gold dataset</span></div>
           <h3>The full picture, down to every quarter hour.</h3>
-          <p>Download the complete Gold dataset, including market prices, load, renewable generation, and calendar features.</p>
-          <dl className="model-facts"><div><dt>Resolution</dt><dd>15 minutes</dd></div><div><dt>Daily grid</dt><dd>96 normalized quarters</dd></div><div><dt>Source</dt><dd>ENTSO-E · OpenHolidays</dd></div><div><dt>Format</dt><dd>CSV, with column headers</dd></div></dl>
+          <p>Download the complete Gold dataset, including market prices, load, renewable generation, weather, and calendar features.</p>
+          <dl className="model-facts"><div><dt>Resolution</dt><dd>15 minutes</dd></div><div><dt>Daily grid</dt><dd>96 normalized quarters</dd></div><div><dt>Source</dt><dd>ENTSO-E · OpenHolidays · <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Open-Meteo</a></dd></div><div><dt>Format</dt><dd>CSV, with column headers</dd></div></dl>
           <div className="download-panel-footer"><DownloadButton href="/api/downloads/gold.csv" filename="delu-gold.csv">Download dataset <span className="file-type">CSV</span></DownloadButton><span className="text-[10px] text-muted">All available dates</span></div>
         </div>
       </div>

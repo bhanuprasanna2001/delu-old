@@ -1,8 +1,12 @@
-from datetime import date
+import json
+from datetime import UTC, date, datetime, timedelta
 from math import isfinite
 from unittest import TestCase
 
-from delu.pipeline.silver import parse_payload
+import pytest
+
+from delu.pipeline.bronze import WEATHER_FIELDS, WEATHER_LOCATIONS
+from delu.pipeline.silver import _parse_weather_payload, _weather_value, parse_payload
 
 
 def payload(
@@ -118,3 +122,108 @@ class ParsePayloadTest(TestCase):
                 "de_lu.load.actual",
                 date(2026, 1, 1),
             )
+
+
+def test_weather_uses_temperature_fallback_and_keeps_only_next_day() -> None:
+    run_date = date(2026, 6, 23)
+    run_start = datetime(2026, 6, 23, tzinfo=UTC)
+    times = [
+        (run_start + timedelta(hours=offset))
+        .replace(tzinfo=None)
+        .isoformat(timespec="minutes")
+        for offset in range(48)
+    ]
+    units = {"time": "iso8601"}
+    for field, _, unit in WEATHER_FIELDS:
+        units[f"{field}_ecmwf_ifs"] = unit
+        units[f"{field}_ecmwf_ifs025"] = unit
+    locations = [location for location in WEATHER_LOCATIONS if location[3] == "sea"]
+    payload = json.dumps(
+        [
+            {
+                "latitude": latitude,
+                "longitude": longitude,
+                "timezone": "GMT",
+                "utc_offset_seconds": 0,
+                "hourly_units": units,
+                "hourly": {
+                    "time": times,
+                    **{
+                        f"{field}_ecmwf_ifs": [
+                            None if field == "temperature_2m" else float(offset)
+                            for offset in range(48)
+                        ]
+                        for field, _, _ in WEATHER_FIELDS
+                    },
+                    **{
+                        f"{field}_ecmwf_ifs025": [
+                            float(offset + 100) for offset in range(48)
+                        ]
+                        for field, _, _ in WEATHER_FIELDS
+                    },
+                },
+            }
+            for _, latitude, longitude, _ in locations
+        ]
+    )
+
+    rows = _parse_weather_payload(payload, run_date, "sea")
+
+    combined = json.loads(payload)
+    primary = []
+    fallback = []
+    for raw in combined:
+        metadata = {
+            key: raw[key]
+            for key in ("latitude", "longitude", "timezone", "utc_offset_seconds")
+        }
+        primary.append(
+            {
+                **metadata,
+                "hourly_units": {
+                    "time": "iso8601",
+                    **{field: unit for field, _, unit in WEATHER_FIELDS},
+                },
+                "hourly": {
+                    "time": times,
+                    **{
+                        field: raw["hourly"][f"{field}_ecmwf_ifs"]
+                        for field, _, _ in WEATHER_FIELDS
+                    },
+                },
+            }
+        )
+        fallback.append(
+            {
+                **metadata,
+                "hourly_units": {"time": "iso8601", "temperature_2m": "°C"},
+                "hourly": {
+                    "time": times,
+                    "temperature_2m": raw["hourly"]["temperature_2m_ecmwf_ifs025"],
+                },
+            }
+        )
+    separate_rows = _parse_weather_payload(
+        json.dumps({"primary": primary, "temperature_fallback": fallback}),
+        run_date,
+        "sea",
+    )
+
+    assert len(rows) == len(locations) * len(WEATHER_FIELDS) * 24
+    assert separate_rows == rows
+    assert {row[0] for row in rows} == {date(2026, 6, 24)}
+    temperature = next(
+        row for row in rows if row[2] == "weather.north_sea_west.temperature_2m"
+    )
+    assert temperature[3] == 122.0
+
+
+def test_weather_repairs_only_the_known_null_shapes() -> None:
+    run_start = datetime(2026, 6, 23, tzinfo=UTC)
+
+    assert _weather_value("temperature_2m", None, 17.5, run_start, run_start) == 17.5
+    assert (
+        _weather_value("shortwave_radiation", None, None, run_start, run_start) == 0.0
+    )
+    with pytest.raises(ValueError, match="unexpected null"):
+        _weather_value("cloud_cover", None, None, run_start, run_start)

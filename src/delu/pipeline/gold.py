@@ -28,7 +28,7 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-from delu.pipeline.bronze import BERLIN
+from delu.pipeline.bronze import BERLIN, WEATHER_FIELDS, WEATHER_LOCATIONS
 from delu.pipeline.silver import TABLE as SILVER_TABLE
 
 TABLE = "delu.gold.model_input"
@@ -51,7 +51,17 @@ ACTUAL = (
     "de_lu.generation.wind_onshore.actual",
     "de_lu.generation.wind_offshore.actual",
 )
-REQUIRED_SERIES = (TARGET, *EXAA, *FORECAST, *ACTUAL)
+WEATHER_SERIES = tuple(
+    f"weather.{location_id}.{field}"
+    for location_id, _, _, _ in WEATHER_LOCATIONS
+    for field, _, _ in WEATHER_FIELDS
+)
+WEATHER_FEATURES = tuple(
+    f"weather_{location_id}_{column}"
+    for location_id, _, _, _ in WEATHER_LOCATIONS
+    for _, column, _ in WEATHER_FIELDS
+)
+REQUIRED_SERIES = (TARGET, *EXAA, *FORECAST, *ACTUAL, *WEATHER_SERIES)
 FEATURE_COLUMNS = (
     "price_de_lu_exaa_eur_per_mwh",
     "price_at_exaa_eur_per_mwh",
@@ -66,6 +76,7 @@ FEATURE_COLUMNS = (
         "wind_onshore_actual_d_minus_2_mw",
         "wind_offshore_actual_d_minus_2_mw",
     ),
+    *WEATHER_FEATURES,
 )
 LOGGER = logging.getLogger(__name__)
 
@@ -169,9 +180,11 @@ def _normalise_intervals(silver: DataFrame) -> DataFrame:
         * (F.col("quarter_of_day") - previous_q)
         / (next_q - previous_q)
     )
-    result = grid.withColumn("value", F.coalesce(F.col("value"), interpolated)).select(
-        *KEY, "series", "value"
-    )
+    filled = F.when(
+        F.col("series").startswith("weather."),
+        F.coalesce(F.col("value"), previous_value, next_value),
+    ).otherwise(F.coalesce(F.col("value"), interpolated))
+    result = grid.withColumn("value", filled).select(*KEY, "series", "value")
     if result.where(F.col("value").isNull()).limit(1).count():
         raise ValueError("Silver contains a gap that cannot be mapped to 96 quarters")
     return result
@@ -350,10 +363,12 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
         ),
         2,
     )
+    weather = _wide(intervals, WEATHER_SERIES, WEATHER_FEATURES)
 
     result = (
         exaa.join(forecast, KEY, "inner")
         .join(actual, KEY, "inner")
+        .join(weather, KEY, "inner")
         .join(target, KEY, "left")
     )
     result = _add_price_lags(result, target)
@@ -406,6 +421,7 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
         "wind_onshore_actual_d_minus_2_mw",
         "wind_offshore_actual_d_minus_2_mw",
         "residual_load_actual_d_minus_2_mw",
+        *WEATHER_FEATURES,
     ]
     spark.sql("CREATE SCHEMA IF NOT EXISTS delu.gold")
     (

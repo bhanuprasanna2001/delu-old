@@ -50,7 +50,7 @@ export default function App() {
     </header>
     <div className="detail-heading"><div><div className="eyebrow mb-2">The daily perspective</div><h1>{selectedDate ? formatDate(selectedDate) : 'Market overview'}</h1></div>{picker}</div>
     {content}
-    <footer className="site-footer"><span className="flex items-center gap-2"><span className="wordmark wordmark-tiny">DELU</span><span>Germany & Luxembourg</span></span><span>Source: ENTSO-E · All times Europe/Berlin</span></footer>
+    <footer className="site-footer"><span className="flex items-center gap-2"><span className="wordmark wordmark-tiny">DELU</span><span>Germany & Luxembourg</span></span><span>Source: ENTSO-E · <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Open-Meteo</a> · All times Europe/Berlin</span></footer>
   </main>
 
   return <main className="overview-page">
