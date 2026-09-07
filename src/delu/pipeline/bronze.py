@@ -87,12 +87,22 @@ def _planned_requests(
     set[RequestKey],
 ]:
     if mode == "morning":
+        first_delivery_date = today.replace(day=1)
+        final_delivery_date = today + timedelta(days=1)
+        delivery_dates = (
+            first_delivery_date + timedelta(days=offset)
+            for offset in range((final_delivery_date - first_delivery_date).days + 1)
+        )
         return (
             [
-                *((today, *request) for request in SDAC),  # D-1 price lag for D
-                *((today + timedelta(days=1), *request) for request in EXAA),  # D
-                *((today, *request) for request in FORECAST),  # D-1
-                *((today - timedelta(days=1), *request) for request in ACTUAL),  # D-2
+                request
+                for delivery_date in delivery_dates
+                for request in (
+                    *((delivery_date - timedelta(days=1), *item) for item in SDAC),
+                    *((delivery_date, *item) for item in EXAA),
+                    *((delivery_date - timedelta(days=1), *item) for item in FORECAST),
+                    *((delivery_date - timedelta(days=2), *item) for item in ACTUAL),
+                )
             ],
             set(),
         )
