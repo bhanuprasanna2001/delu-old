@@ -4,7 +4,7 @@ import useSWR from 'swr'
 import Chart, { colors } from './Chart'
 import { dateSchema, datesSchema, fetchData, featuresSchema, forecastSchema, formatDate, formatTimestamp, observationsSchema, percent, pricePoints, publishedAfterDelivery, todayBerlin } from './data'
 import type { DateSummary } from './data'
-import { DataError, DatePicker, Loading, Status } from './ui'
+import { DataError, DatePicker, GitHubLink, Loading, Status } from './ui'
 
 const Detail = lazy(() => import('./Detail'))
 const readLocation = () => {
@@ -46,7 +46,7 @@ export default function App() {
   if (location.detail) return <main className="detail-page">
     <header className="detail-header">
       <div className="flex items-center gap-5"><button type="button" className="icon-button back-button" aria-label="Back to overview" onClick={() => navigate(selectedDate ?? '', false)}><ArrowLeft size={17} /></button><a href="/" className="wordmark wordmark-small" onClick={event => { event.preventDefault(); navigate(selectedDate ?? '', false) }}>DELU</a><span className="header-divider" /><span className="hidden text-xs text-muted sm:block">The day ahead, in detail.</span></div>
-      <span className="market-label">DE <span className="text-line">/</span> LU</span>
+      <div className="flex items-center gap-4"><GitHubLink /><span className="market-label">DE <span className="text-line">/</span> LU</span></div>
     </header>
     <div className="detail-heading"><div><div className="eyebrow mb-2">The daily perspective</div><h1>{selectedDate ? formatDate(selectedDate) : 'Market overview'}</h1></div>{picker}</div>
     {content}
@@ -54,6 +54,7 @@ export default function App() {
   </main>
 
   return <main className="overview-page">
+    <GitHubLink className="overview-github" />
     <div className="overview-content">
       <header className="overview-brand"><h1 className="wordmark">DELU</h1><p>Clarity for the day ahead.</p></header>
       <div className="overview-date">{picker}</div>

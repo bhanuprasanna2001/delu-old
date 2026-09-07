@@ -225,6 +225,11 @@ def create_app(
             content={"detail": "Databricks dependency unavailable"},
         )
 
+    @application.get("/healthz", include_in_schema=False)
+    def liveness() -> dict[str, str]:
+        """Check the web process without waking the SQL warehouse."""
+        return {"status": "ok"}
+
     @application.get("/api/health", response_model=Health)
     def health(backend: StoreDependency) -> Health:
         return Health(status="ok", **backend.health())

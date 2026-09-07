@@ -17,8 +17,14 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked --all-groups
-      - run: uv run ruff format --check src tests
-      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests app
+      - run: uv run ruff check src tests app
       - run: uv run ty check
       - run: uv run pytest --cov=delu --cov-report=term-missing
       - run: uv build --wheel
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --tag delu-web .

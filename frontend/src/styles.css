@@ -31,7 +31,9 @@
   .wordmark { font-family: Georgia, 'Times New Roman', serif; font-style: italic; font-weight: 600; font-size: 80px; line-height: 1; letter-spacing: -6px; padding-right: 7px; }
   .wordmark-small { font-size: 34px; letter-spacing: -2.8px; padding-right: 3px; }
   .wordmark-tiny { font-size: 21px; letter-spacing: -1.7px; padding-right: 2px; }
-  .overview-page { @apply flex min-h-svh items-center justify-center px-5 py-12 sm:px-10; }
+  .overview-page { @apply relative flex min-h-svh items-center justify-center px-5 py-12 sm:px-10; }
+  .github-link { @apply inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted hover:bg-paper hover:text-ink; }
+  .overview-github { @apply absolute right-5 top-5 sm:right-8 sm:top-8; }
   .overview-content { @apply w-full max-w-[870px]; animation: appear 550ms ease both; }
   .overview-brand { @apply mb-10 text-center; }
   .overview-brand p { @apply mt-5 text-[11px] tracking-[0.14em] text-muted; }

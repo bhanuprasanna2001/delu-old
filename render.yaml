@@ -1,0 +1,32 @@
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: delu
+    runtime: docker
+    region: frankfurt
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: DATABRICKS_HOST
+        value: https://dbc-a4fcce00-b5bf.cloud.databricks.com
+      - key: DATABRICKS_CLIENT_ID
+        sync: false
+      - key: DATABRICKS_CLIENT_SECRET
+        sync: false
+      - key: DATABRICKS_WAREHOUSE_ID
+        value: 32972e04a08b3a3f
+      - key: DATABRICKS_AUTH_TYPE
+        value: oauth-m2m
+      - key: DELU_GOLD_TABLE
+        value: delu.gold.model_input
+      - key: DELU_FORECAST_TABLE
+        value: delu.gold.forecasts
+      - key: DELU_FORECAST_RUN_TABLE
+        value: delu.gold.forecast_runs
+      - key: DELU_METRICS_TABLE
+        value: delu.gold.forecast_metrics
+      - key: DELU_MODEL_VOLUME
+        value: /Volumes/delu/gold/model_exports

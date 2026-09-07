@@ -222,3 +222,15 @@ def test_website_mount_preserves_api_and_missing_asset_responses(
     assert missing_api.status_code == 404
     assert missing_api.json() == {"detail": "API endpoint not found"}
     assert missing_asset.status_code == 404
+
+
+def test_liveness_does_not_query_databricks() -> None:
+    store = MagicMock(spec=SqlForecastStore)
+    store.health.side_effect = RuntimeError("The SQL warehouse is asleep")
+
+    [response] = asyncio.run(get(create_app(store), "/healthz"))
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    store.health.assert_not_called()
+    store._query.assert_not_called()

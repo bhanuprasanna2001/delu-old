@@ -1,0 +1,18 @@
+# Only the app and frontend are needed to build the public website.
+**
+!app/
+!app/**
+!frontend/
+!frontend/**
+
+# Never copy local credentials, dependencies, or generated output.
+**/.env
+**/.env.*
+**/node_modules/
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store
+**/test-results/
+**/playwright-report/
+app/static/
+frontend/dist/
