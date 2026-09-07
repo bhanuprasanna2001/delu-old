@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from http.client import RemoteDisconnected
@@ -29,15 +30,19 @@ WORKERS = 12
 BATCH_DAYS = 7
 LOGGER = logging.getLogger(__name__)
 
-SDAC = tuple(
+Request = tuple[str, str, str, Mapping[str, object]]
+PlannedRequest = tuple[date, str, str, str, Mapping[str, object]]
+RequestKey = tuple[date, str]
+
+SDAC: tuple[Request, ...] = tuple(
     (f"{area.lower()}.price.sdac", "query_day_ahead_prices", area, {"sequence": 1})
     for area in ("DE_LU", "AT")
 )
-EXAA = tuple(
+EXAA: tuple[Request, ...] = tuple(
     (f"{area.lower()}.price.exaa", "query_day_ahead_prices", area, {"sequence": 2})
     for area in ("DE_LU", "AT")
 )
-FORECAST = (
+FORECAST: tuple[Request, ...] = (
     ("de_lu.load.forecast", "query_load_forecast", "DE_LU", {"process_type": "A01"}),
     *(
         (
@@ -53,7 +58,7 @@ FORECAST = (
         }.items()
     ),
 )
-ACTUAL = (
+ACTUAL: tuple[Request, ...] = (
     ("de_lu.load.actual", "query_load", "DE_LU", {}),
     *(
         (
@@ -69,7 +74,48 @@ ACTUAL = (
         }.items()
     ),
 )
-ALL = SDAC + EXAA + FORECAST + ACTUAL
+ALL: tuple[Request, ...] = SDAC + EXAA + FORECAST + ACTUAL
+
+
+def _planned_requests(
+    mode: str,
+    *,
+    today: date,
+    start: date,
+) -> tuple[
+    list[PlannedRequest],
+    set[RequestKey],
+]:
+    if mode == "morning":
+        return (
+            [
+                *((today, *request) for request in SDAC),  # D-1 price lag for D
+                *((today + timedelta(days=1), *request) for request in EXAA),  # D
+                *((today, *request) for request in FORECAST),  # D-1
+                *((today - timedelta(days=1), *request) for request in ACTUAL),  # D-2
+            ],
+            set(),
+        )
+    if mode == "settlement":
+        return (
+            [(today + timedelta(days=1), *request) for request in SDAC],  # D
+            set(),
+        )
+    if mode == "full":
+        end = today - timedelta(days=1)
+        planned = [
+            (start + timedelta(days=offset), *request)
+            for offset in range((end - start).days + 1)
+            for request in ALL
+        ]
+        refresh_days = {end - timedelta(days=offset) for offset in range(3)}
+        refresh = {
+            (delivery_date, series)
+            for delivery_date, series, *_ in planned
+            if delivery_date in refresh_days
+        }
+        return planned, refresh
+    raise ValueError("mode must be full, morning, or settlement")
 
 
 def ingest(
@@ -97,31 +143,7 @@ def ingest(
         spark.createDataFrame([], SCHEMA).write.format("delta").saveAsTable(TABLE)
 
     # Each item is (delivery_date, series, entsoe-py method, area, method kwargs).
-    if mode == "morning":
-        planned = [
-            *((today + timedelta(days=1), *request) for request in EXAA),  # D
-            *((today, *request) for request in FORECAST),  # D-1
-            *((today - timedelta(days=1), *request) for request in ACTUAL),  # D-2
-        ]
-        refresh = set()
-    elif mode == "settlement":
-        planned = [(today + timedelta(days=1), *request) for request in SDAC]  # D
-        refresh = set()
-    elif mode == "full":
-        end = today - timedelta(days=1)
-        planned = [
-            (start + timedelta(days=offset), *request)
-            for offset in range((end - start).days + 1)
-            for request in ALL
-        ]
-        refresh_days = {end - timedelta(days=offset) for offset in range(3)}
-        refresh = {
-            (delivery_date, series)
-            for delivery_date, series, *_ in planned
-            if delivery_date in refresh_days
-        }
-    else:
-        raise ValueError("mode must be full, morning, or settlement")
+    planned, refresh = _planned_requests(mode, today=today, start=start)
 
     if not planned:
         LOGGER.info("Nothing new to ingest.")
@@ -154,7 +176,7 @@ def ingest(
     )
 
     def fetch(
-        request: tuple[date, str, str, str, dict[str, object]],
+        request: PlannedRequest,
     ) -> tuple[date, str, str]:
         delivery_date, series, method, area, params = request
         client = EntsoeRawClient(api_key, retry_count=1, retry_delay=0, timeout=60)

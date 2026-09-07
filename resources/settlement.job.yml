@@ -30,8 +30,8 @@ resources:
         - task_key: bronze_settlement
           environment_key: default
           timeout_seconds: 1800
-          max_retries: 2
-          min_retry_interval_millis: 300000
+          max_retries: 6
+          min_retry_interval_millis: 3600000
           python_wheel_task:
             package_name: delu
             entry_point: delu-bronze
