@@ -35,7 +35,7 @@ resources:
           python_wheel_task:
             package_name: delu
             entry_point: delu-bronze
-            parameters: [morning]
+            parameters: [morning, --workers, "2"]
         - task_key: silver
           depends_on:
             - task_key: bronze_morning

@@ -9,6 +9,7 @@ import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as datetime_time
 from http.client import RemoteDisconnected
 from itertools import batched
 from socket import gaierror
@@ -66,6 +67,7 @@ WEATHER_LOCATIONS = (
 )
 WORKERS = 12
 BATCH_DAYS = 7
+SETTLEMENT_CUTOFF = datetime_time(15)
 LOGGER = logging.getLogger(__name__)
 
 Request = tuple[str, str, str, Mapping[str, object]]
@@ -123,6 +125,14 @@ def _latest_weather_run(now: datetime) -> date:
         raise ValueError("now must be timezone-aware")
     local = now.astimezone(BERLIN)
     return local.date() - timedelta(days=local.hour < 9)
+
+
+def latest_settlement_date(now: datetime) -> date:
+    """Return the latest delivery date expected to have published SDAC prices."""
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    local = now.astimezone(BERLIN)
+    return local.date() + timedelta(days=local.time() >= SETTLEMENT_CUTOFF)
 
 
 def _weather_parameters(cell: str, run_date: date, model: str) -> dict[str, str]:
@@ -184,17 +194,23 @@ def _planned_requests(
     today: date,
     start: date,
     weather_run_date: date | None = None,
+    settlement_date: date | None = None,
 ) -> tuple[
     list[PlannedRequest],
     set[RequestKey],
 ]:
     weather_run_date = today if weather_run_date is None else weather_run_date
     if mode == "morning":
-        first_delivery_date = today.replace(day=1)
+        first_delivery_date = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
         final_delivery_date = today + timedelta(days=1)
         delivery_dates = (
             first_delivery_date + timedelta(days=offset)
             for offset in range((final_delivery_date - first_delivery_date).days + 1)
+        )
+        first_weather_run = first_delivery_date - timedelta(days=1)
+        weather_runs = (
+            first_weather_run + timedelta(days=offset)
+            for offset in range((weather_run_date - first_weather_run).days + 1)
         )
         return (
             [
@@ -207,12 +223,24 @@ def _planned_requests(
                     *((delivery_date - timedelta(days=2), *item) for item in ACTUAL),
                 )
             ]
-            + [(weather_run_date, *request) for request in WEATHER],
+            + [
+                (run_date, *request) for run_date in weather_runs for request in WEATHER
+            ],
             set(),
         )
     if mode == "settlement":
+        settlement_date = (
+            today + timedelta(days=1) if settlement_date is None else settlement_date
+        )
+        first_settlement_date = (
+            settlement_date.replace(day=1) - timedelta(days=1)
+        ).replace(day=1)
         return (
-            [(today + timedelta(days=1), *request) for request in SDAC],  # D
+            [
+                (first_settlement_date + timedelta(days=offset), *request)
+                for offset in range((settlement_date - first_settlement_date).days + 1)
+                for request in SDAC
+            ],
             set(),
         )
     if mode == "full":
@@ -268,6 +296,7 @@ def ingest(
         today=today,
         start=start,
         weather_run_date=_latest_weather_run(current),
+        settlement_date=latest_settlement_date(current),
     )
 
     if not planned:
@@ -297,10 +326,6 @@ def ingest(
         return 0
 
     api_key = None
-    if any(method != "weather" for _, _, method, _, _ in planned):
-        api_key = os.getenv("ENTSOE_API_KEY") or DBUtils(spark).secrets.get(
-            scope="delu", key="entsoe-api-key"
-        )
 
     def fetch(
         request: PlannedRequest,
@@ -338,7 +363,7 @@ def ingest(
                     if isinstance(exc, requests.HTTPError)
                     else None
                 )
-                if attempt == 3 or status not in (None, 429, 500, 502, 503, 504):
+                if attempt == 3 or status not in (None, 429, 500, 502, 503, 504, 599):
                     raise
                 delay = min(2**attempt, 30) + random.random()
                 LOGGER.warning(
@@ -349,28 +374,41 @@ def ingest(
         raise AssertionError("unreachable")
 
     written = 0
-    for dates in batched(sorted({request[0] for request in planned}), BATCH_DAYS):
-        batch = [request for request in planned if request[0] in dates]
-        LOGGER.info(
-            "Fetching %d source responses for %s through %s with %d workers.",
-            len(batch),
-            dates[0],
-            dates[-1],
-            min(workers, len(batch)),
-        )
-        with ThreadPoolExecutor(max_workers=min(workers, len(batch))) as pool:
-            rows = list(pool.map(fetch, batch))
+    groups = (
+        [request for request in planned if request[2] == "weather"],
+        [request for request in planned if request[2] != "weather"],
+    )
+    for requests_for_source in groups:
+        if not requests_for_source:
+            continue
+        if requests_for_source[0][2] != "weather":
+            api_key = os.getenv("ENTSOE_API_KEY") or DBUtils(spark).secrets.get(
+                scope="delu", key="entsoe-api-key"
+            )
+        for dates in batched(
+            sorted({request[0] for request in requests_for_source}), BATCH_DAYS
+        ):
+            batch = [request for request in requests_for_source if request[0] in dates]
+            LOGGER.info(
+                "Fetching %d source responses for %s through %s with %d workers.",
+                len(batch),
+                dates[0],
+                dates[-1],
+                min(workers, len(batch)),
+            )
+            with ThreadPoolExecutor(max_workers=min(workers, len(batch))) as pool:
+                rows = list(pool.map(fetch, batch))
 
-        ingested_at = datetime.now(UTC)
-        spark.createDataFrame(
-            [
-                (delivery_date, series, payload, ingested_at)
-                for delivery_date, series, payload in rows
-            ],
-            SCHEMA,
-        ).write.format("delta").mode("append").saveAsTable(TABLE)
-        written += len(rows)
-        LOGGER.info("Appended %d raw responses to %s.", len(rows), TABLE)
+            ingested_at = datetime.now(UTC)
+            spark.createDataFrame(
+                [
+                    (delivery_date, series, payload, ingested_at)
+                    for delivery_date, series, payload in rows
+                ],
+                SCHEMA,
+            ).write.format("delta").mode("append").saveAsTable(TABLE)
+            written += len(rows)
+            LOGGER.info("Appended %d raw responses to %s.", len(rows), TABLE)
     return written
 
 

@@ -28,3 +28,19 @@ def test_dates_to_forecast_prioritizes_latest_and_refills_gaps() -> None:
 def test_dates_to_forecast_rejects_reversed_window() -> None:
     with pytest.raises(ValueError, match="start cannot be after end"):
         _dates_to_forecast(date(2026, 9, 2), date(2026, 9, 1), set())
+
+
+def test_dates_to_forecast_skips_days_without_complete_gold() -> None:
+    missing = _dates_to_forecast(
+        date(2026, 9, 3),
+        date(2026, 9, 9),
+        {date(2026, 9, 5), date(2026, 9, 8)},
+        {date(2026, 9, day) for day in range(3, 9)},
+    )
+
+    assert missing == (
+        date(2026, 9, 3),
+        date(2026, 9, 4),
+        date(2026, 9, 6),
+        date(2026, 9, 7),
+    )

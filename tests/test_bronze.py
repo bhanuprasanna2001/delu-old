@@ -19,6 +19,7 @@ from delu.pipeline.bronze import (
     _latest_weather_run,
     _planned_requests,
     _weather_parameters,
+    latest_settlement_date,
 )
 
 
@@ -28,9 +29,9 @@ def test_morning_plan_covers_the_forecast_month_through_tomorrow() -> None:
     planned, _ = _planned_requests("morning", today=today, start=DEFAULT_START)
 
     fetched = {(delivery_date, series) for delivery_date, series, *_ in planned}
-    month_start = date(2026, 9, 1)
+    month_start = date(2026, 8, 1)
     assert len(planned) == (
-        8 * (len(SDAC) + len(EXAA) + len(FORECAST) + len(ACTUAL)) + len(WEATHER)
+        39 * (len(SDAC) + len(EXAA) + len(FORECAST) + len(ACTUAL) + len(WEATHER))
     )
     assert {(month_start - date.resolution, series) for series, *_ in SDAC}.issubset(
         fetched
@@ -44,15 +45,28 @@ def test_morning_plan_covers_the_forecast_month_through_tomorrow() -> None:
     }.issubset(fetched)
     assert {(today, series) for series, *_ in SDAC}.issubset(fetched)
     assert {(today, series) for series, *_ in WEATHER}.issubset(fetched)
+    assert {(month_start - date.resolution, series) for series, *_ in WEATHER}.issubset(
+        fetched
+    )
 
 
-def test_settlement_plan_keeps_fetching_tomorrows_sdac() -> None:
+def test_settlement_plan_refills_previous_and_current_month_gaps() -> None:
     today = date(2026, 9, 7)
 
     planned, _ = _planned_requests("settlement", today=today, start=DEFAULT_START)
 
     fetched = {(delivery_date, series) for delivery_date, series, *_ in planned}
-    assert fetched == {(date(2026, 9, 8), series) for series, *_ in SDAC}
+    assert len(fetched) == 39 * len(SDAC)
+    assert {(date(2026, 8, 1), series) for series, *_ in SDAC}.issubset(fetched)
+    assert {(date(2026, 9, 8), series) for series, *_ in SDAC}.issubset(fetched)
+
+
+def test_settlement_date_does_not_roll_forward_before_afternoon() -> None:
+    before = datetime(2026, 9, 8, 12, 59, tzinfo=UTC)
+    cutoff = datetime(2026, 9, 8, 13, 0, tzinfo=UTC)
+
+    assert latest_settlement_date(before) == date(2026, 9, 8)
+    assert latest_settlement_date(cutoff) == date(2026, 9, 9)
 
 
 def test_weather_waits_until_nine_in_berlin() -> None:

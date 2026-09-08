@@ -1,4 +1,4 @@
-"""Run the 11:30 batch forecast and repair current-month gaps."""
+"""Run the 11:30 batch forecast and repair recent gaps."""
 
 from __future__ import annotations
 
@@ -41,12 +41,16 @@ def _dates_to_forecast(
     start: date,
     end: date,
     complete: set[date],
+    available: set[date] | None = None,
 ) -> tuple[date, ...]:
     if start > end:
         raise ValueError("forecast start cannot be after end")
     dates = (start + timedelta(days=offset) for offset in range((end - start).days + 1))
     missing = [
-        delivery_date for delivery_date in dates if delivery_date not in complete
+        delivery_date
+        for delivery_date in dates
+        if delivery_date not in complete
+        and (available is None or delivery_date in available)
     ]
     if end in missing:
         missing.remove(end)
@@ -127,6 +131,24 @@ def _complete_forecast_dates(
             ["delivery_date", "model_version"],
             "inner",
         )
+        .select("delivery_date")
+        .collect()
+    }
+
+
+def _complete_gold_dates(
+    spark: SparkSession,
+    *,
+    start: date,
+    end: date,
+) -> set[date]:
+    return {
+        row.delivery_date
+        for row in spark.table(GOLD_TABLE)
+        .where(F.col("delivery_date").between(F.lit(start), F.lit(end)))
+        .groupBy("delivery_date")
+        .agg(F.countDistinct("quarter_of_day").alias("quarters"))
+        .where(F.col("quarters") == 96)
         .select("delivery_date")
         .collect()
     }
@@ -245,13 +267,17 @@ def backfill_forecasts(
 ) -> tuple[date, ...]:
     """Forecast missing or incomplete days in an inclusive delivery-date window."""
     spark = _spark_session(spark)
+    available = _complete_gold_dates(spark, start=start, end=end)
     missing = _dates_to_forecast(
         start,
         end,
         _complete_forecast_dates(spark, start=start, end=end),
+        available,
     )
     if not missing:
-        LOGGER.info("Forecasts are complete from %s through %s", start, end)
+        LOGGER.info(
+            "No complete Gold days need forecasts from %s through %s", start, end
+        )
         return ()
 
     model, version = _production_model()
@@ -277,7 +303,8 @@ def main() -> None:
         return
 
     today = datetime.now(BERLIN).date()
-    backfill_forecasts(today.replace(day=1), today + timedelta(days=1))
+    start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+    backfill_forecasts(start, today + timedelta(days=1))
 
 
 if __name__ == "__main__":

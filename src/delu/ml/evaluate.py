@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 
 import mlflow
 import pandas as pd
@@ -18,11 +18,46 @@ from delu.ml.monitoring import assess_drift
 from delu.ml.predict import FORECAST_RUN_TABLE, FORECAST_TABLE
 from delu.ml.tables import merge_delta
 from delu.ml.train import MODEL_NAME, TARGET_COVERAGE
-from delu.pipeline.bronze import BERLIN
+from delu.pipeline.bronze import latest_settlement_date
 from delu.pipeline.gold import TABLE as GOLD_TABLE
 
 METRICS_TABLE = "delu.gold.forecast_metrics"
 LOGGER = logging.getLogger(__name__)
+
+
+def _evaluation_dates(
+    spark: SparkSession,
+    *,
+    start: date,
+    end: date,
+) -> tuple[date, ...]:
+    forecast = (
+        spark.table(FORECAST_TABLE)
+        .where(F.col("delivery_date").between(F.lit(start), F.lit(end)))
+        .groupBy("delivery_date")
+        .agg(F.countDistinct("quarter_of_day").alias("quarters"))
+        .where(F.col("quarters") == 96)
+        .select("delivery_date")
+    )
+    actual = (
+        spark.table(GOLD_TABLE)
+        .where(F.col("delivery_date").between(F.lit(start), F.lit(end)))
+        .where(F.col("price_de_lu_sdac_eur_per_mwh").isNotNull())
+        .groupBy("delivery_date")
+        .agg(F.countDistinct("quarter_of_day").alias("quarters"))
+        .where(F.col("quarters") == 96)
+        .select("delivery_date")
+    )
+    eligible = forecast.join(actual, "delivery_date", "inner")
+    if spark.catalog.tableExists(METRICS_TABLE):
+        eligible = eligible.join(
+            spark.table(METRICS_TABLE).select("delivery_date"),
+            "delivery_date",
+            "left_anti",
+        )
+    return tuple(
+        row.delivery_date for row in eligible.orderBy("delivery_date").collect()
+    )
 
 
 def evaluate_day(
@@ -164,10 +199,26 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    delivery_date = args.delivery_date or datetime.now(BERLIN).date() + timedelta(
-        days=1
-    )
-    evaluate_day(delivery_date, fail_on_drift=not args.no_fail_on_drift)
+    if args.delivery_date is not None:
+        evaluate_day(args.delivery_date, fail_on_drift=not args.no_fail_on_drift)
+        return
+
+    now = datetime.now(UTC)
+    end = latest_settlement_date(now)
+    start = (end.replace(day=1) - date.resolution).replace(day=1)
+    spark = DatabricksSession.builder.serverless().getOrCreate()
+    failures: list[str] = []
+    for delivery_date in _evaluation_dates(spark, start=start, end=end):
+        try:
+            evaluate_day(
+                delivery_date,
+                spark=spark,
+                fail_on_drift=not args.no_fail_on_drift,
+            )
+        except RuntimeError as exc:
+            failures.append(f"{delivery_date}: {exc}")
+    if failures:
+        raise RuntimeError("; ".join(failures))
 
 
 if __name__ == "__main__":

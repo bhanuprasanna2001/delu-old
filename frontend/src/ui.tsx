@@ -5,16 +5,23 @@ import { dayStatus, formatDate } from './data'
 import type { DateSummary } from './data'
 
 export function DatePicker({ days, date, onChange }: { days: DateSummary[]; date: string; onChange: (value: string) => void }) {
-  const previous = days.find(day => day.delivery_date < date)?.delivery_date
-  const next = days.findLast(day => day.delivery_date > date)?.delivery_date
+  const move = (offset: number) => {
+    const value = new Date(`${date}T00:00:00Z`)
+    value.setUTCDate(value.getUTCDate() + offset)
+    return value.toISOString().slice(0, 10)
+  }
+  const minimum = days.at(-1)?.delivery_date
+  const maximum = days[0]?.delivery_date
+  const previous = minimum && date > minimum ? move(-1) : undefined
+  const next = maximum && date < maximum ? move(1) : undefined
   return <div className="date-picker">
-    <button type="button" className="icon-button" aria-label="Previous available day" disabled={!previous} onClick={() => previous && onChange(previous)}><ChevronLeft size={15} /></button>
+    <button type="button" className="icon-button" aria-label="Previous day" disabled={!previous} onClick={() => previous && onChange(previous)}><ChevronLeft size={15} /></button>
     <label className="date-input-label">
       <CalendarDays size={14} className="text-muted" />
       <span>{formatDate(date)}</span>
       <input aria-label="Delivery date" type="date" value={date} min={days.at(-1)?.delivery_date} max={days[0]?.delivery_date} onChange={event => event.target.value && onChange(event.target.value)} />
     </label>
-    <button type="button" className="icon-button" aria-label="Next available day" disabled={!next} onClick={() => next && onChange(next)}><ChevronRight size={15} /></button>
+    <button type="button" className="icon-button" aria-label="Next day" disabled={!next} onClick={() => next && onChange(next)}><ChevronRight size={15} /></button>
   </div>
 }
 
