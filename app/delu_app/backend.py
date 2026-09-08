@@ -28,6 +28,51 @@ _VOLUME = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*/[A-Za-z_][A-Za-z0-9_]*$"
 )
 _ARCHIVE = re.compile(r"^sdac-cqr-v[0-9]+\.zip$")
+_WEATHER_LOCATIONS = (
+    "emden",
+    "bremen",
+    "hamburg",
+    "kiel",
+    "rostock",
+    "hanover",
+    "berlin",
+    "muenster",
+    "kassel",
+    "leipzig",
+    "dresden",
+    "cologne",
+    "frankfurt",
+    "erfurt",
+    "nuremberg",
+    "luxembourg",
+    "stuttgart",
+    "freiburg",
+    "munich",
+    "passau",
+    "north_sea_west",
+    "north_sea_centre",
+    "north_sea_east",
+    "baltic_west",
+    "baltic_east",
+)
+WEATHER_LOCATION_COUNT = len(_WEATHER_LOCATIONS)
+_WEATHER_METRICS = (
+    "temperature_2m_c",
+    "wind_speed_100m_m_s",
+    "shortwave_radiation_w_m2",
+    "cloud_cover_pct",
+)
+
+
+def _weather_mean(metric: str) -> str:
+    columns = " + ".join(
+        f"weather_{location}_{metric}" for location in _WEATHER_LOCATIONS
+    )
+    return f"({columns}) / {WEATHER_LOCATION_COUNT} AS {metric}"
+
+
+def _weather_select() -> str:
+    return ",\n".join(_weather_mean(metric) for metric in _WEATHER_METRICS)
 
 
 class ArtifactNotFoundError(FileNotFoundError):
@@ -224,6 +269,18 @@ class SqlForecastStore:
                    wind_onshore_actual_d_minus_2_mw,
                    wind_offshore_actual_d_minus_2_mw,
                    residual_load_actual_d_minus_2_mw
+            FROM {self.settings.gold_table}
+            WHERE delivery_date = :delivery_date
+            ORDER BY quarter_of_day
+            """,
+            {"delivery_date": delivery_date},
+        )
+
+    def weather(self, delivery_date: date) -> list[dict[str, Any]]:
+        """Return quarter-hour means across the 25 weather grid points."""
+        return self._query(
+            f"""
+            SELECT quarter_of_day, {_weather_select()}
             FROM {self.settings.gold_table}
             WHERE delivery_date = :delivery_date
             ORDER BY quarter_of_day

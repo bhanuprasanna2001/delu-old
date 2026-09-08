@@ -61,6 +61,16 @@ export const featuresSchema = z.object({
   })),
 })
 
+export const weatherSchema = z.object({
+  delivery_date: dateSchema, model_run_date: dateSchema,
+  model: z.literal('ecmwf_ifs'), location_count: z.number().int().positive(),
+  quarters: grid(z.object({
+    quarter_of_day: quarter,
+    temperature_2m_c: number, wind_speed_100m_m_s: number,
+    shortwave_radiation_w_m2: number, cloud_cover_pct: number,
+  })),
+})
+
 export const modelSchema = z.object({
   model_name: z.string(), model_family: z.string(), version: z.string(),
   training_through: dateSchema, published_at: z.string(), target_coverage: number,
@@ -72,6 +82,8 @@ export type Forecast = z.infer<typeof forecastSchema>
 export type Observations = z.infer<typeof observationsSchema>
 export type Features = z.infer<typeof featuresSchema>
 export type Feature = Features['rows'][number]
+export type Weather = z.infer<typeof weatherSchema>
+export type WeatherQuarter = Weather['quarters'][number]
 export type Metrics = z.infer<typeof metricsSchema>
 export type Model = z.infer<typeof modelSchema>
 

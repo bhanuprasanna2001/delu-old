@@ -182,6 +182,36 @@ def test_features_reject_duplicate_quarters() -> None:
     assert response.status_code == 503
 
 
+def test_weather_endpoint_returns_complete_grid_mean() -> None:
+    store = MagicMock(spec=SqlForecastStore)
+    store.weather.return_value = [
+        {
+            "quarter_of_day": quarter,
+            "temperature_2m_c": 17.5,
+            "wind_speed_100m_m_s": 6.25,
+            "shortwave_radiation_w_m2": 350.0,
+            "cloud_cover_pct": 42.0,
+        }
+        for quarter in range(96)
+    ]
+
+    [response] = asyncio.run(get(create_app(store), "/api/weather/2026-09-08"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model_run_date"] == "2026-09-07"
+    assert payload["model"] == "ecmwf_ifs"
+    assert payload["location_count"] == 25
+    assert payload["quarters"][0] == {
+        "quarter_of_day": 0,
+        "delivery_start_local": "2026-09-08T00:00:00",
+        "temperature_2m_c": 17.5,
+        "wind_speed_100m_m_s": 6.25,
+        "shortwave_radiation_w_m2": 350.0,
+        "cloud_cover_pct": 42.0,
+    }
+
+
 def test_unsettled_forecast_does_not_show_metrics_or_truth() -> None:
     store = MagicMock(spec=SqlForecastStore)
     rows = forecast_rows()

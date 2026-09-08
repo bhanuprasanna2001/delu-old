@@ -2,8 +2,8 @@ import { ChevronLeft, ChevronRight, Clock3, Database, PackageCheck } from 'lucid
 import { useState } from 'react'
 import useSWR from 'swr'
 import Chart, { colors } from './Chart'
-import { fetchData, formatDate, formatNumber, formatTimestamp, modelSchema, percent, publishedAfterDelivery, timeRange } from './data'
-import type { DateSummary, Feature, Features, Forecast, Metrics, PricePoint } from './data'
+import { fetchData, formatDate, formatNumber, formatTimestamp, modelSchema, percent, publishedAfterDelivery, timeRange, weatherSchema } from './data'
+import type { DateSummary, Feature, Features, Forecast, Metrics, PricePoint, Weather, WeatherQuarter } from './data'
 import { DataError, DownloadButton, Loading, SectionHeading } from './ui'
 
 type Props = {
@@ -26,6 +26,7 @@ const metricDefinitions: { key: keyof Pick<Metrics, 'mae' | 'rmse' | 'bias' | 'p
 
 export default function Detail({ day, forecast, points, features, featuresError, retryFeatures }: Props) {
   const model = useSWR('/api/model', url => fetchData(url, modelSchema))
+  const weather = useSWR(`/api/weather/${day.delivery_date}`, url => fetchData(url, weatherSchema))
   const metrics = forecast?.metrics
   return <div className="detail-sections">
     <section aria-label="Forecast performance">
@@ -79,6 +80,12 @@ export default function Detail({ day, forecast, points, features, featuresError,
       <SectionHeading number="04" title="The fundamentals"><span className="section-context">{formatDate(day.delivery_date, 'short')} · Model inputs</span></SectionHeading>
       <p className="section-description">The forecast inputs come from the day before the selected date; measured values come from two days earlier. They show the information available to the model, rather than forecast accuracy for a single day.</p>
       {featuresError && !features ? <DataError error={featuresError} retry={retryFeatures} /> : !features ? <Loading>Loading fundamentals</Loading> : <Fundamentals features={features} />}
+    </section>
+
+    <section aria-label="Weather plots">
+      <SectionHeading number="05" title="Weather outlook"><span className="section-context">{weather.data ? `${weather.data.location_count}-point grid mean · run ${formatDate(weather.data.model_run_date, 'short')}` : 'Open-Meteo · ECMWF IFS'}</span></SectionHeading>
+      <p className="section-description">Cutoff-safe forecasts for the delivery day from the previous 00Z model run. Temperature-only gaps use ECMWF IFS 0.25°; known midnight solar gaps are zero.</p>
+      {weather.error && !weather.data ? <DataError error={weather.error} retry={() => void weather.mutate()} /> : !weather.data ? <Loading>Loading weather outlook</Loading> : <WeatherPlots weather={weather.data} />}
     </section>
   </div>
 }
@@ -149,4 +156,25 @@ function Fundamentals({ features }: { features: Features }) {
     prior: generationKeys[generation].reduce((sum, key) => sum + row[`${key}_actual_d_minus_2_mw`], 0) / 1000,
   }))
   return <div className="fundamentals-grid"><div className="fundamental-panel"><div className="fundamental-heading"><h3>Electricity load</h3><span className="text-[11px] text-muted">Germany</span></div><Chart points={load} series={inputSeries} unit="GW" label="Electricity load model inputs" /></div><div className="fundamental-panel"><div className="fundamental-heading"><h3>Renewable generation</h3><select aria-label="Generation source" value={generation} onChange={event => setGeneration(event.target.value as keyof typeof generationKeys)}>{Object.keys(generationKeys).map(key => <option key={key}>{key}</option>)}</select></div><Chart points={renewable} series={inputSeries} unit="GW" label={`${generation} generation model inputs`} /></div></div>
+}
+
+type WeatherMetric = keyof Omit<WeatherQuarter, 'quarter_of_day'>
+const weatherMetrics: { key: WeatherMetric; title: string; unit: string; yDomain?: [number | 'auto', number | 'auto'] }[] = [
+  { key: 'temperature_2m_c', title: 'Air temperature', unit: '°C' },
+  { key: 'wind_speed_100m_m_s', title: 'Wind speed at 100 m', unit: 'm/s', yDomain: [0, 'auto'] },
+  { key: 'shortwave_radiation_w_m2', title: 'Solar radiation', unit: 'W/m²', yDomain: [0, 'auto'] },
+  { key: 'cloud_cover_pct', title: 'Cloud cover', unit: '%', yDomain: [0, 100] },
+]
+const weatherSeries = [{ key: 'mean', label: 'Grid mean', color: colors.forecast, style: 'dashed' as const }]
+
+function WeatherPlots({ weather }: { weather: Weather }) {
+  const rows = weather.quarters.toSorted((a, b) => a.quarter_of_day - b.quarter_of_day)
+  return <div className="fundamentals-grid">{weatherMetrics.map(metric => {
+    const values = rows.map(row => row[metric.key])
+    const points = rows.map(row => ({ quarter: row.quarter_of_day, mean: row[metric.key] }))
+    return <div className="fundamental-panel" key={metric.key}>
+      <div className="fundamental-heading"><h3>{metric.title}</h3><span className="text-[11px] tabular-nums text-muted">{formatNumber(Math.min(...values))} to {formatNumber(Math.max(...values))} {metric.unit}</span></div>
+      <Chart points={points} series={weatherSeries} unit={metric.unit} yDomain={metric.yDomain} label={`${metric.title}, ${weather.location_count}-point grid mean`} />
+    </div>
+  })}</div>
 }

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, cast
 
@@ -14,9 +14,10 @@ from databricks.sdk.errors import DatabricksError
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, FiniteFloat
 
 from .backend import (
+    WEATHER_LOCATION_COUNT,
     ArtifactNotFoundError,
     FileDownload,
     SqlForecastStore,
@@ -85,6 +86,23 @@ class ForecastDay(BaseModel):
 class FeatureTable(BaseModel):
     delivery_date: date
     rows: list[dict[str, Any]]
+
+
+class WeatherQuarter(BaseModel):
+    quarter_of_day: int
+    delivery_start_local: str
+    temperature_2m_c: FiniteFloat
+    wind_speed_100m_m_s: FiniteFloat
+    shortwave_radiation_w_m2: FiniteFloat
+    cloud_cover_pct: FiniteFloat
+
+
+class WeatherDay(BaseModel):
+    delivery_date: date
+    model_run_date: date
+    model: str
+    location_count: int
+    quarters: list[WeatherQuarter]
 
 
 class ObservationQuarter(BaseModel):
@@ -301,6 +319,33 @@ def create_app(
                 delivery_date, int(row["quarter_of_day"])
             )
         return FeatureTable(delivery_date=delivery_date, rows=rows)
+
+    @application.get("/api/weather/{delivery_date}", response_model=WeatherDay)
+    def weather(delivery_date: date, backend: StoreDependency) -> WeatherDay:
+        rows = backend.weather(delivery_date)
+        if not rows:
+            raise HTTPException(status_code=404, detail="Weather inputs not found")
+        if (
+            len(rows) != 96
+            or {int(row["quarter_of_day"]) for row in rows} != set(range(96))
+            or any(value is None for row in rows for value in row.values())
+        ):
+            raise HTTPException(status_code=503, detail="Weather inputs are incomplete")
+        return WeatherDay(
+            delivery_date=delivery_date,
+            model_run_date=delivery_date - timedelta(days=1),
+            model="ecmwf_ifs",
+            location_count=WEATHER_LOCATION_COUNT,
+            quarters=[
+                WeatherQuarter(
+                    **row,
+                    delivery_start_local=_local_start(
+                        delivery_date, int(row["quarter_of_day"])
+                    ),
+                )
+                for row in rows
+            ],
+        )
 
     @application.get("/api/model", response_model=ModelSummary)
     def model(backend: StoreDependency) -> ModelSummary:

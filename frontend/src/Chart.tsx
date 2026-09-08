@@ -14,10 +14,11 @@ type Props = {
   series: Series[]
   unit: string
   label: string
+  yDomain?: [number | 'auto', number | 'auto']
   onInspect?: () => void
 }
 
-export default function Chart({ points, series, unit, label, onInspect }: Props) {
+export default function Chart({ points, series, unit, label, yDomain, onInspect }: Props) {
   const pattern = useId().replace(/:/g, '')
   const [hidden, setHidden] = useState(() => new Set(series.filter(item => item.hidden).map(item => item.key)))
   const visible = series.filter(item => !hidden.has(item.key))
@@ -48,7 +49,7 @@ export default function Chart({ points, series, unit, label, onInspect }: Props)
             </defs>
             <CartesianGrid vertical={false} stroke="var(--color-line)" strokeDasharray="2 5" />
             <XAxis dataKey="quarter" type="number" domain={[0, 95]} ticks={[0, 16, 32, 48, 64, 80, 95]} tickFormatter={timeOfQuarter} tickLine={false} axisLine={false} tickMargin={15} minTickGap={30} tick={{ fontSize: 10, fill: 'var(--color-muted)' }} height={36} />
-            <YAxis domain={unit === 'GW' ? [0, 'auto'] : ['auto', 'auto']} tickCount={5} tickLine={false} axisLine={false} tickMargin={9} tick={{ fontSize: 10, fill: 'var(--color-muted)' }} tickFormatter={value => Number(value).toLocaleString('en-GB', { maximumFractionDigits: 0 })} width={55} />
+            <YAxis domain={yDomain ?? (unit === 'GW' ? [0, 'auto'] : ['auto', 'auto'])} tickCount={5} tickLine={false} axisLine={false} tickMargin={9} tick={{ fontSize: 10, fill: 'var(--color-muted)' }} tickFormatter={value => Number(value).toLocaleString('en-GB', { maximumFractionDigits: 0 })} width={55} />
             <ReferenceLine y={0} stroke="var(--color-line)" />
             <Tooltip
               isAnimationActive={false}

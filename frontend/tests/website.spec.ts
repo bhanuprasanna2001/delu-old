@@ -29,6 +29,13 @@ const features = Array.from({ length: 96 }, (_, q) => ({
   residual_load_day_ahead_forecast_mw: 25000, residual_load_actual_d_minus_2_mw: 27000,
   day_of_week: 5, month: 9, season: 'autumn', is_weekend: true, is_holiday_de_nationwide: false, is_holiday_lu: false,
 }))
+const weather = Array.from({ length: 96 }, (_, q) => ({
+  quarter_of_day: q,
+  temperature_2m_c: 18 + Math.sin((q - 24) / 96 * Math.PI * 2) * 7,
+  wind_speed_100m_m_s: 5 + Math.sin(q / 96 * Math.PI * 4),
+  shortwave_radiation_w_m2: Math.max(0, Math.sin((q - 24) / 48 * Math.PI) * 700),
+  cloud_cover_pct: 55 + Math.sin(q / 96 * Math.PI * 2) * 30,
+}))
 
 async function mockApi(page: Page, mode: { settled?: boolean; featuresError?: boolean; datesError?: boolean; empty?: boolean } = {}) {
   await page.route('**/api/**', async route => {
@@ -45,6 +52,10 @@ async function mockApi(page: Page, mode: { settled?: boolean; featuresError?: bo
       model_name: 'delu.ml.sdac_cqr', model_family: 'hist_gradient_boosting_cqr', version: '1',
       training_through: '2026-08-31', published_at: '2026-09-03T06:00:00Z', target_coverage: 0.9,
       point_shrinkage: 0.61, test_metrics: { mae: 8.57, picp: 0.91 }, baseline_exaa_mae: 8.81,
+    } })
+    if (url.pathname.startsWith('/api/weather/')) return route.fulfill({ json: {
+      delivery_date: url.pathname.split('/')[3], model_run_date: '2026-09-04',
+      model: 'ecmwf_ifs', location_count: 25, quarters: weather,
     } })
     const day = url.pathname.split('/')[3]
     if (url.pathname.endsWith('/features')) {
@@ -103,6 +114,10 @@ test('overview, precise tooltip, detail layout, inputs, generation selector and 
   await expect(page.getByRole('rowheader', { name: '00:00 - 00:15', exact: true })).toBeVisible()
   await page.getByLabel('Generation source').selectOption('Solar')
   await expect(page.getByLabel('Solar generation model inputs')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Weather outlook', exact: true })).toBeVisible()
+  await expect(page.getByText('25-point grid mean · run 04 Sept 2026', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Air temperature, 25-point grid mean')).toBeVisible()
+  await expect(page.getByLabel('Cloud cover, 25-point grid mean')).toBeVisible()
   const modelDownload = page.waitForEvent('download')
   await page.getByRole('button', { name: /Download model/ }).click()
   expect((await modelDownload).suggestedFilename()).toBe('delu-model-v1.zip')
