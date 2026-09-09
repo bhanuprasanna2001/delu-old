@@ -66,10 +66,10 @@ Job schedules use `Europe/Berlin`; the weather model-run timestamp is UTC as mar
 
 | Time | Flow | Result |
 | :--- | :--- | :--- |
-| Daily 02:00 | Recovery | Fetch missing validated source responses, rebuild Silver and Gold, and evaluate eligible stored forecasts |
+| Daily 02:00 | Recovery | Fetch missing validated source responses, rebuild Silver and Gold, and evaluate complete stored forecasts |
 | `D-1` 00:00 UTC | Weather model run | Supply weather forecasts valid on `D` |
 | `D-1` 11:30 | Morning forecast | Fetch features, rebuild Silver and Gold, and publish 96 forecasts for `D` |
-| Before `D-1` 15:00 | Production cutoff | Accept only a genuine forecast created before the SDAC result is fetched |
+| Before `D-1` 15:00 | Production cutoff | Classify the forecast as on-time; later forecasts remain research results |
 | `D-1` 15:00 | Settlement | Fetch the published SDAC curve for `D`, rebuild Gold, and evaluate the stored forecast |
 | Monthly, day 3 at 06:00 | Training | Train through the previous month-end and promote only when all gates pass |
 
@@ -167,11 +167,11 @@ z-score, and prediction-mean z-score.
 
 ### Evaluate
 
-Evaluation considers only complete 96-quarter forecasts created on `D-1` before
-15:00. Once Gold contains the complete SDAC curve, it records MAE, RMSE, bias,
-interval coverage, mean interval width, interval score, and EXAA and seven-day SDAC
-baselines. Rolling error, interval coverage, input drift, and output drift can fail
-the job and trigger Databricks notifications.
+Evaluation considers every complete 96-quarter stored forecast once Gold contains
+the complete SDAC curve. It records MAE, RMSE, bias, interval coverage, mean
+interval width, interval score, and EXAA and seven-day SDAC baselines. Forecasts
+created outside the `D-1` 15:00 cutoff are labeled late and excluded from on-time
+rolling monitoring. Only on-time drift can fail the job and trigger notifications.
 
 ### Recover
 

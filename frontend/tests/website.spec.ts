@@ -3,7 +3,7 @@ import type { Page } from '@playwright/test'
 
 // Deliberately synthetic, isolated HTTP fixtures. The website never serves demo data.
 const dates = [
-  { delivery_date: '2026-09-05', model_version: '1', predicted_at: '2026-09-05T09:32:00Z', settled: true, has_forecast: true, has_actual: true, has_metrics: true },
+  { delivery_date: '2026-09-05', model_version: '1', predicted_at: '2026-09-04T13:36:00Z', settled: true, has_forecast: true, has_actual: true, has_metrics: true },
   { delivery_date: '2026-09-03', model_version: null, predicted_at: null, settled: true, has_forecast: false, has_actual: true, has_metrics: false },
 ]
 const metrics = {
@@ -67,7 +67,7 @@ async function mockApi(page: Page, mode: { settled?: boolean; featuresError?: bo
       delivery_date: day, quarters: quarters.map(row => ({ quarter_of_day: row.quarter_of_day, actual_price_eur_per_mwh: row.actual_price_eur_per_mwh, price_de_lu_exaa_eur_per_mwh: 50, price_at_exaa_eur_per_mwh: 55 })),
     } })
     return route.fulfill({ json: {
-      delivery_date: day, model_version: '1', predicted_at: '2026-09-05T09:32:00Z', nominal_coverage: 0.9,
+      delivery_date: day, model_version: '1', predicted_at: '2026-09-04T13:36:00Z', nominal_coverage: 0.9,
       settled: mode.settled !== false, metrics: mode.settled === false ? null : metrics,
       quarters: mode.settled === false ? quarters.map(row => ({ ...row, actual_price_eur_per_mwh: null })) : quarters,
     } })
@@ -100,6 +100,7 @@ test('overview, precise tooltip, detail layout, inputs, generation selector and 
   await page.getByRole('button', { name: 'Open detailed view', exact: true }).click()
   await expect(page).toHaveURL(/view=detail/)
   await expect(page.getByRole('heading', { name: 'Forecast performance', exact: true })).toBeVisible()
+  await expect(page.getByText('Its metrics are shown for research and excluded from on-time monitoring.')).toBeVisible()
   await expect(page.getByText('90.0%', { exact: true }).first()).toBeVisible()
   if (!isMobile) {
     const bounds = await page.locator('.detail-plot-grid').boundingBox()

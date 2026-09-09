@@ -2,7 +2,7 @@ import { ChevronLeft, ChevronRight, Clock3, Database, PackageCheck } from 'lucid
 import { useState } from 'react'
 import useSWR from 'swr'
 import Chart, { colors } from './Chart'
-import { fetchData, formatDate, formatNumber, formatTimestamp, modelSchema, percent, publishedAfterDelivery, timeRange, weatherSchema } from './data'
+import { fetchData, forecastIsLate, formatDate, formatNumber, formatTimestamp, modelSchema, percent, timeRange, weatherSchema } from './data'
 import type { DateSummary, Feature, Features, Forecast, Metrics, PricePoint, Weather, WeatherQuarter } from './data'
 import { DataError, DownloadButton, Loading, SectionHeading } from './ui'
 
@@ -31,7 +31,7 @@ export default function Detail({ day, forecast, points, features, featuresError,
   return <div className="detail-sections">
     <section aria-label="Forecast performance">
       <SectionHeading number="01" title="Forecast performance"><span className="section-context">{metrics ? `Evaluated ${formatTimestamp(metrics.evaluated_at)}` : 'Settlement from 15:00 · Europe/Berlin'}</span></SectionHeading>
-      {publishedAfterDelivery(forecast ?? day) ? <p className="section-description">This forecast was published after its delivery day. These metrics describe a retrospective run, not on-time forecasting performance.</p> : null}
+      {forecastIsLate(forecast ?? day) ? <p className="section-description">This forecast was published outside the day-ahead cutoff. Its metrics are shown for research and excluded from on-time monitoring.</p> : null}
       {metrics ? <>
         <div className="metrics-grid">{metricDefinitions.map(item => <div className="metric" key={item.key} title={item.note}>
           <span className="metric-label">{item.label}</span><div className="metric-value">{item.percent ? percent(metrics[item.key]) : formatNumber(metrics[item.key])}</div>

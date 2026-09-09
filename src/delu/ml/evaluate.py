@@ -18,18 +18,28 @@ from delu.ml.monitoring import assess_drift
 from delu.ml.predict import FORECAST_RUN_TABLE, FORECAST_TABLE
 from delu.ml.tables import merge_delta
 from delu.ml.train import MODEL_NAME, TARGET_COVERAGE
-from delu.pipeline.bronze import SETTLEMENT_CUTOFF, latest_settlement_date
+from delu.pipeline.bronze import BERLIN, SETTLEMENT_CUTOFF, latest_settlement_date
 from delu.pipeline.gold import TABLE as GOLD_TABLE
 
 METRICS_TABLE = "delu.gold.forecast_metrics"
 LOGGER = logging.getLogger(__name__)
 
 
-def _production_forecasts(frame: DataFrame) -> DataFrame:
+def _on_time_forecasts(frame: DataFrame) -> DataFrame:
     predicted_local = F.from_utc_timestamp("predicted_at", "Europe/Berlin")
     return frame.where(
         (F.to_date(predicted_local) == F.date_sub("delivery_date", 1))
         & (F.hour(predicted_local) < SETTLEMENT_CUTOFF.hour)
+    )
+
+
+def _forecast_is_on_time(delivery_date: date, predicted_at: datetime) -> bool:
+    if predicted_at.tzinfo is None or predicted_at.utcoffset() is None:
+        predicted_at = predicted_at.replace(tzinfo=UTC)
+    predicted_local = predicted_at.astimezone(BERLIN)
+    return (
+        predicted_local.date() == delivery_date - date.resolution
+        and predicted_local.time() < SETTLEMENT_CUTOFF
     )
 
 
@@ -41,7 +51,7 @@ def _evaluation_dates(
 ) -> tuple[date, ...]:
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     forecast = (
-        _production_forecasts(spark.table(FORECAST_TABLE))
+        spark.table(FORECAST_TABLE)
         .where(F.col("delivery_date").between(F.lit(start), F.lit(end)))
         .groupBy("delivery_date")
         .agg(F.countDistinct("quarter_of_day").alias("quarters"))
@@ -84,7 +94,7 @@ def evaluate_day(
         or DatabricksSession.builder.serverless().getOrCreate()
     )
     spark.conf.set("spark.sql.session.timeZone", "UTC")
-    forecast = _production_forecasts(spark.table(FORECAST_TABLE)).where(
+    forecast = spark.table(FORECAST_TABLE).where(
         F.col("delivery_date") == F.lit(delivery_date)
     )
     actual = spark.table(GOLD_TABLE).where(
@@ -97,6 +107,7 @@ def evaluate_day(
             "delivery_date",
             "quarter_of_day",
             "forecast.model_version",
+            "forecast.predicted_at",
             "forecast.predicted_price_eur_per_mwh",
             "forecast.lower_price_eur_per_mwh",
             "forecast.upper_price_eur_per_mwh",
@@ -115,6 +126,13 @@ def evaluate_day(
     if len(versions) != 1:
         raise ValueError(f"Forecast rows contain multiple model versions: {versions}")
     version = str(versions[0])
+    predicted_at = joined["predicted_at"].unique()
+    if len(predicted_at) != 1:
+        raise ValueError("Forecast rows contain multiple prediction timestamps")
+    prediction_time = pd.Timestamp(predicted_at[0]).to_pydatetime()
+    if not isinstance(prediction_time, datetime):
+        raise ValueError("Forecast rows contain an invalid prediction timestamp")
+    on_time = _forecast_is_on_time(delivery_date, prediction_time)
 
     metrics = forecast_metrics(
         joined["price_de_lu_sdac_eur_per_mwh"],
@@ -151,13 +169,21 @@ def evaluate_day(
         ]
     )
     if spark.catalog.tableExists(METRICS_TABLE):
-        prior_history = (
+        prior = (
             spark.table(METRICS_TABLE)
             .where(F.col("delivery_date") < F.lit(delivery_date))
             .where(F.col("monitoring_status") != "pending")
-            .select(*history_columns)
-            .orderBy("delivery_date")
-            .toPandas()
+        )
+        if on_time:
+            prior = prior.join(
+                _on_time_forecasts(spark.table(FORECAST_RUN_TABLE)).select(
+                    "delivery_date"
+                ),
+                "delivery_date",
+                "inner",
+            )
+        prior_history = (
+            prior.select(*history_columns).orderBy("delivery_date").toPandas()
         )
         history = pd.concat([prior_history, current_history], ignore_index=True)
     else:
@@ -181,10 +207,19 @@ def evaluate_day(
         reference_mae=reference_mae,
         target_coverage=TARGET_COVERAGE,
     )
+    monitoring_status = monitoring.status if on_time else "late"
+    monitoring_reasons = (
+        monitoring.reasons
+        if on_time
+        else (
+            "forecast created outside the D-1 15:00 production cutoff; "
+            "excluded from on-time monitoring",
+        )
+    )
     metric_row.update(
         {
-            "monitoring_status": monitoring.status,
-            "monitoring_reasons": "; ".join(monitoring.reasons),
+            "monitoring_status": monitoring_status,
+            "monitoring_reasons": "; ".join(monitoring_reasons),
             "rolling_7d_mae": monitoring.rolling_7d_mae,
             "rolling_7d_baseline_exaa_mae": (monitoring.rolling_7d_baseline_exaa_mae),
             "rolling_28d_picp": monitoring.rolling_28d_picp,
@@ -197,7 +232,7 @@ def evaluate_day(
         keys=("delivery_date",),
     )
     LOGGER.info("Evaluated %s: %s", delivery_date, metrics)
-    if monitoring.reasons:
+    if on_time and monitoring.reasons:
         message = "; ".join(monitoring.reasons)
         LOGGER.error("Forecast monitoring alert for %s: %s", delivery_date, message)
         if fail_on_drift:

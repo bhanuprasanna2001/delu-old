@@ -2,7 +2,7 @@ import { ArrowDownRight, ArrowLeft, ArrowUpRight } from 'lucide-react'
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import useSWR from 'swr'
 import Chart, { colors } from './Chart'
-import { dateSchema, datesSchema, fetchData, featuresSchema, forecastSchema, formatDate, formatTimestamp, observationsSchema, percent, pricePoints, publishedAfterDelivery, todayBerlin } from './data'
+import { dateSchema, datesSchema, fetchData, featuresSchema, forecastIsLate, forecastSchema, formatDate, formatTimestamp, observationsSchema, percent, pricePoints, todayBerlin } from './data'
 import type { DateSummary } from './data'
 import { DataError, DatePicker, GitHubLink, Loading, Status } from './ui'
 
@@ -91,7 +91,7 @@ function DayView({ day, detail, onExpand }: { day: DateSummary; detail: boolean;
       <span>{!day.has_forecast ? 'Observed prices · No stored model forecast' : forecast.data ? `Published ${formatTimestamp(forecast.data.predicted_at)}` : 'Forecast 11:30 · Settlement from 15:00'}</span>
       {detail ? <span>Europe/Berlin</span> : <button type="button" className="explore-button" onClick={onExpand} onPointerEnter={() => void import('./Detail')}>Explore this day <ArrowDownRight size={13} /></button>}
     </div>
-    {publishedAfterDelivery(forecast.data ?? day) ? <p className="inline-note">Published after the delivery day. This is a retrospective run.</p> : null}
+    {forecastIsLate(forecast.data ?? day) ? <p className="inline-note">Published outside the day-ahead cutoff. Evaluated for research, excluded from on-time monitoring.</p> : null}
     {features.error && !features.data && day.has_forecast ? <div className="inline-note" aria-live="polite">EXAA inputs are unavailable. <button onClick={() => void features.mutate()} className="underline underline-offset-2">Retry inputs</button></div> : null}
     {result.error && result.data ? <div className="inline-note" aria-live="polite">Showing the last loaded data. Refresh failed. <button onClick={() => void result.mutate()} className="underline underline-offset-2">Retry</button></div> : null}
   </section>
