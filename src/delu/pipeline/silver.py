@@ -130,6 +130,7 @@ def parse_payload(
     try:
         root = ET.fromstring(payload)
         intervals: dict[datetime, float] = {}
+        curve_type: str | None = None
 
         for time_series in root.iter():
             if _local_name(time_series.tag) != "TimeSeries":
@@ -387,6 +388,14 @@ def _parse_weather_payload(
                 if valid_time.astimezone(BERLIN).date() == delivery_date
             )
     return rows
+
+
+def validate_payload(payload: str, series: str, source_date: date) -> None:
+    """Reject an incomplete or non-finite source response before Bronze stores it."""
+    if series.startswith(f"weather.{WEATHER_MODEL}."):
+        _parse_weather_payload(payload, source_date, series.rsplit(".", 1)[-1])
+        return
+    parse_payload(payload, series, source_date)
 
 
 def _validate_raw(raw: DataFrame) -> None:

@@ -1,4 +1,4 @@
-"""Run the 11:30 batch forecast and repair recent gaps."""
+"""Publish one genuine next-day forecast before the market result is available."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from delu.ml.data import prepare_daily_data
 from delu.ml.model import ConformalPriceForecaster
 from delu.ml.tables import merge_delta
 from delu.ml.train import MODEL_NAME, TARGET_COVERAGE
-from delu.pipeline.bronze import BERLIN
+from delu.pipeline.bronze import BERLIN, SETTLEMENT_CUTOFF
 from delu.pipeline.gold import TABLE as GOLD_TABLE
 
 FORECAST_TABLE = "delu.gold.forecasts"
@@ -27,140 +27,16 @@ FORECAST_RUN_TABLE = "delu.gold.forecast_runs"
 LOGGER = logging.getLogger(__name__)
 
 
-def _spark_session(spark: SparkSession | None) -> SparkSession:
-    session = (
-        spark
-        or SparkSession.getActiveSession()
-        or DatabricksSession.builder.serverless().getOrCreate()
-    )
-    session.conf.set("spark.sql.session.timeZone", "UTC")
-    return session
-
-
-def _dates_to_forecast(
-    start: date,
-    end: date,
-    complete: set[date],
-    available: set[date] | None = None,
-) -> tuple[date, ...]:
-    if start > end:
-        raise ValueError("forecast start cannot be after end")
-    dates = (start + timedelta(days=offset) for offset in range((end - start).days + 1))
-    missing = [
-        delivery_date
-        for delivery_date in dates
-        if delivery_date not in complete
-        and (available is None or delivery_date in available)
-    ]
-    if end in missing:
-        missing.remove(end)
-        missing.insert(0, end)
-    return tuple(missing)
-
-
-def _complete_forecast_dates(
-    spark: SparkSession,
-    *,
-    start: date,
-    end: date,
-) -> set[date]:
-    if not spark.catalog.tableExists(FORECAST_TABLE) or not spark.catalog.tableExists(
-        FORECAST_RUN_TABLE
-    ):
-        return set()
-
-    finite_prices = (
-        F.col("predicted_price_eur_per_mwh").isNotNull()
-        & ~F.isnan("predicted_price_eur_per_mwh")
-        & F.col("lower_price_eur_per_mwh").isNotNull()
-        & ~F.isnan("lower_price_eur_per_mwh")
-        & F.col("upper_price_eur_per_mwh").isNotNull()
-        & ~F.isnan("upper_price_eur_per_mwh")
-    )
-    valid_interval = (
-        F.col("quarter_of_day").between(0, 95)
-        & finite_prices
-        & (F.col("lower_price_eur_per_mwh") <= F.col("predicted_price_eur_per_mwh"))
-        & (F.col("predicted_price_eur_per_mwh") <= F.col("upper_price_eur_per_mwh"))
-        & F.col("nominal_coverage").between(0, 1)
-        & F.col("model_version").isNotNull()
-        & F.col("predicted_at").isNotNull()
-    )
-    complete_forecasts = (
-        spark.table(FORECAST_TABLE)
-        .where(F.col("delivery_date").between(F.lit(start), F.lit(end)))
-        .groupBy("delivery_date")
-        .agg(
-            F.count("*").alias("rows"),
-            F.countDistinct(F.when(valid_interval, F.col("quarter_of_day"))).alias(
-                "valid_quarters"
-            ),
-            F.countDistinct("model_version").alias("model_versions"),
-            F.first("model_version").alias("model_version"),
+def _validate_forecast_time(delivery_date: date, current: datetime) -> None:
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    local = current.astimezone(BERLIN)
+    if delivery_date != local.date() + timedelta(days=1):
+        raise ValueError("Production forecasts are only allowed for tomorrow")
+    if local.time() >= SETTLEMENT_CUTOFF:
+        raise ValueError(
+            "The 15:00 Europe/Berlin production forecast cutoff has passed"
         )
-        .where(
-            (F.col("rows") == 96)
-            & (F.col("valid_quarters") == 96)
-            & (F.col("model_versions") == 1)
-        )
-        .select("delivery_date", "model_version")
-    )
-    finite_run_metrics = (
-        F.col("data_outlier_rate").isNotNull()
-        & ~F.isnan("data_outlier_rate")
-        & F.col("max_feature_mean_z").isNotNull()
-        & ~F.isnan("max_feature_mean_z")
-        & F.col("prediction_mean_z").isNotNull()
-        & ~F.isnan("prediction_mean_z")
-    )
-    complete_runs = (
-        spark.table(FORECAST_RUN_TABLE)
-        .where(F.col("delivery_date").between(F.lit(start), F.lit(end)))
-        .where(
-            finite_run_metrics
-            & F.col("model_version").isNotNull()
-            & F.col("predicted_at").isNotNull()
-        )
-        .select("delivery_date", "model_version")
-        .distinct()
-    )
-    return {
-        row.delivery_date
-        for row in complete_forecasts.join(
-            complete_runs,
-            ["delivery_date", "model_version"],
-            "inner",
-        )
-        .select("delivery_date")
-        .collect()
-    }
-
-
-def _complete_gold_dates(
-    spark: SparkSession,
-    *,
-    start: date,
-    end: date,
-) -> set[date]:
-    return {
-        row.delivery_date
-        for row in spark.table(GOLD_TABLE)
-        .where(F.col("delivery_date").between(F.lit(start), F.lit(end)))
-        .groupBy("delivery_date")
-        .agg(F.countDistinct("quarter_of_day").alias("quarters"))
-        .where(F.col("quarters") == 96)
-        .select("delivery_date")
-        .collect()
-    }
-
-
-def _production_model() -> tuple[ConformalPriceForecaster, str]:
-    mlflow.set_registry_uri("databricks-uc")
-    version = MlflowClient().get_model_version_by_alias(MODEL_NAME, "prod")
-    model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}/{version.version}")
-    if not isinstance(model, ConformalPriceForecaster):
-        raise TypeError("The production model has an incompatible Python type")
-    return model, version.version
 
 
 def _drift_values(
@@ -179,21 +55,18 @@ def forecast_day(
     delivery_date: date,
     *,
     spark: SparkSession | None = None,
+    now: datetime | None = None,
 ) -> str:
-    """Forecast 96 local quarters and merge the immutable daily result."""
-    spark = _spark_session(spark)
-    model, version = _production_model()
-    _save_forecast_day(delivery_date, spark=spark, model=model, version=version)
-    return version
+    """Forecast tomorrow, failing if inputs are incomplete or the cutoff passed."""
+    current = datetime.now(UTC) if now is None else now
+    _validate_forecast_time(delivery_date, current)
 
-
-def _save_forecast_day(
-    delivery_date: date,
-    *,
-    spark: SparkSession,
-    model: ConformalPriceForecaster,
-    version: str,
-) -> None:
+    spark = (
+        spark
+        or SparkSession.getActiveSession()
+        or DatabricksSession.builder.serverless().getOrCreate()
+    )
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
     gold = (
         spark.table(GOLD_TABLE)
         .where(F.col("delivery_date") == F.lit(delivery_date))
@@ -204,11 +77,21 @@ def _save_forecast_day(
     if len(daily) != 1 or daily.dates[0] != delivery_date:
         raise ValueError(f"Gold does not contain one complete day for {delivery_date}")
 
+    mlflow.set_registry_uri("databricks-uc")
+    version = MlflowClient().get_model_version_by_alias(MODEL_NAME, "prod")
+    model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}/{version.version}")
+    if not isinstance(model, ConformalPriceForecaster):
+        raise TypeError("The production model has an incompatible Python type")
     prediction = model.predict(daily.features)[0]
     if not np.isfinite(prediction).all() or np.any(prediction[:, 1] > prediction[:, 2]):
         raise ValueError("The production model returned invalid prediction intervals")
 
-    predicted_at = datetime.now(UTC).replace(tzinfo=None)
+    outlier_rate, max_feature_mean_z, prediction_mean_z = _drift_values(
+        model, daily.features, prediction[:, 0]
+    )
+    published_at = current if now is not None else datetime.now(UTC)
+    _validate_forecast_time(delivery_date, published_at)
+    predicted_at = published_at.astimezone(UTC).replace(tzinfo=None)
     sorted_gold = gold.sort_values("quarter_of_day")
     forecast = pd.DataFrame(
         {
@@ -219,31 +102,27 @@ def _save_forecast_day(
             "lower_price_eur_per_mwh": prediction[:, 1],
             "upper_price_eur_per_mwh": prediction[:, 2],
             "nominal_coverage": TARGET_COVERAGE,
-            "model_version": version,
+            "model_version": version.version,
             "predicted_at": predicted_at,
         }
-    )
-    merge_delta(
-        spark,
-        spark.createDataFrame(forecast),
-        table=FORECAST_TABLE,
-        keys=("delivery_date", "quarter_of_day"),
-    )
-
-    outlier_rate, max_feature_mean_z, prediction_mean_z = _drift_values(
-        model, daily.features, prediction[:, 0]
     )
     run = pd.DataFrame(
         [
             {
                 "delivery_date": delivery_date,
-                "model_version": version,
+                "model_version": version.version,
                 "predicted_at": predicted_at,
                 "data_outlier_rate": outlier_rate,
                 "max_feature_mean_z": max_feature_mean_z,
                 "prediction_mean_z": prediction_mean_z,
             }
         ]
+    )
+    merge_delta(
+        spark,
+        spark.createDataFrame(forecast),
+        table=FORECAST_TABLE,
+        keys=("delivery_date", "quarter_of_day"),
     )
     merge_delta(
         spark,
@@ -255,56 +134,27 @@ def _save_forecast_day(
         "Saved 96 forecasts for %s using %s version %s",
         delivery_date,
         MODEL_NAME,
-        version,
+        version.version,
     )
-
-
-def backfill_forecasts(
-    start: date,
-    end: date,
-    *,
-    spark: SparkSession | None = None,
-) -> tuple[date, ...]:
-    """Forecast missing or incomplete days in an inclusive delivery-date window."""
-    spark = _spark_session(spark)
-    available = _complete_gold_dates(spark, start=start, end=end)
-    missing = _dates_to_forecast(
-        start,
-        end,
-        _complete_forecast_dates(spark, start=start, end=end),
-        available,
-    )
-    if not missing:
-        LOGGER.info(
-            "No complete Gold days need forecasts from %s through %s", start, end
-        )
-        return ()
-
-    model, version = _production_model()
-    for delivery_date in missing:
-        _save_forecast_day(
-            delivery_date,
-            spark=spark,
-            model=model,
-            version=version,
-        )
-    return missing
+    return version.version
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--delivery-date", type=date.fromisoformat)
+    dates = parser.add_mutually_exclusive_group()
+    dates.add_argument("--delivery-date", type=date.fromisoformat)
+    dates.add_argument(
+        "--run-date",
+        type=date.fromisoformat,
+        help="Date the scheduled job started, used to make retries deterministic",
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    if args.delivery_date is not None:
-        forecast_day(args.delivery_date)
-        return
-
-    today = datetime.now(BERLIN).date()
-    start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
-    backfill_forecasts(start, today + timedelta(days=1))
+    current = datetime.now(UTC)
+    run_date = args.run_date or current.astimezone(BERLIN).date()
+    forecast_day(args.delivery_date or run_date + timedelta(days=1), now=current)
 
 
 if __name__ == "__main__":

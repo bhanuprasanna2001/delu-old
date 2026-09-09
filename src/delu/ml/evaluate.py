@@ -10,7 +10,7 @@ import mlflow
 import pandas as pd
 from databricks.connect import DatabricksSession
 from mlflow import MlflowClient
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from delu.ml.metrics import forecast_metrics
@@ -18,11 +18,19 @@ from delu.ml.monitoring import assess_drift
 from delu.ml.predict import FORECAST_RUN_TABLE, FORECAST_TABLE
 from delu.ml.tables import merge_delta
 from delu.ml.train import MODEL_NAME, TARGET_COVERAGE
-from delu.pipeline.bronze import latest_settlement_date
+from delu.pipeline.bronze import SETTLEMENT_CUTOFF, latest_settlement_date
 from delu.pipeline.gold import TABLE as GOLD_TABLE
 
 METRICS_TABLE = "delu.gold.forecast_metrics"
 LOGGER = logging.getLogger(__name__)
+
+
+def _production_forecasts(frame: DataFrame) -> DataFrame:
+    predicted_local = F.from_utc_timestamp("predicted_at", "Europe/Berlin")
+    return frame.where(
+        (F.to_date(predicted_local) == F.date_sub("delivery_date", 1))
+        & (F.hour(predicted_local) < SETTLEMENT_CUTOFF.hour)
+    )
 
 
 def _evaluation_dates(
@@ -31,8 +39,9 @@ def _evaluation_dates(
     start: date,
     end: date,
 ) -> tuple[date, ...]:
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
     forecast = (
-        spark.table(FORECAST_TABLE)
+        _production_forecasts(spark.table(FORECAST_TABLE))
         .where(F.col("delivery_date").between(F.lit(start), F.lit(end)))
         .groupBy("delivery_date")
         .agg(F.countDistinct("quarter_of_day").alias("quarters"))
@@ -51,7 +60,9 @@ def _evaluation_dates(
     eligible = forecast.join(actual, "delivery_date", "inner")
     if spark.catalog.tableExists(METRICS_TABLE):
         eligible = eligible.join(
-            spark.table(METRICS_TABLE).select("delivery_date"),
+            spark.table(METRICS_TABLE)
+            .where(F.col("monitoring_status") != "pending")
+            .select("delivery_date"),
             "delivery_date",
             "left_anti",
         )
@@ -73,7 +84,7 @@ def evaluate_day(
         or DatabricksSession.builder.serverless().getOrCreate()
     )
     spark.conf.set("spark.sql.session.timeZone", "UTC")
-    forecast = spark.table(FORECAST_TABLE).where(
+    forecast = _production_forecasts(spark.table(FORECAST_TABLE)).where(
         F.col("delivery_date") == F.lit(delivery_date)
     )
     actual = spark.table(GOLD_TABLE).where(
@@ -127,27 +138,30 @@ def evaluate_day(
         "model_version": version,
         **metrics,
         "evaluated_at": evaluated_at,
-        "monitoring_status": "pending",
-        "monitoring_reasons": "",
-        "rolling_7d_mae": metrics["mae"],
-        "rolling_7d_baseline_exaa_mae": metrics["baseline_exaa_mae"],
-        "rolling_28d_picp": metrics["picp"],
     }
-    updates = spark.createDataFrame(pd.DataFrame([metric_row]))
-    merge_delta(
-        spark,
-        updates,
-        table=METRICS_TABLE,
-        keys=("delivery_date",),
+    history_columns = ("delivery_date", "mae", "baseline_exaa_mae", "picp")
+    current_history = pd.DataFrame(
+        [
+            {
+                "delivery_date": delivery_date,
+                "mae": metrics["mae"],
+                "baseline_exaa_mae": metrics["baseline_exaa_mae"],
+                "picp": metrics["picp"],
+            }
+        ]
     )
-
-    history = (
-        spark.table(METRICS_TABLE)
-        .where(F.col("delivery_date") <= F.lit(delivery_date))
-        .select("delivery_date", "mae", "baseline_exaa_mae", "picp")
-        .orderBy("delivery_date")
-        .toPandas()
-    )
+    if spark.catalog.tableExists(METRICS_TABLE):
+        prior_history = (
+            spark.table(METRICS_TABLE)
+            .where(F.col("delivery_date") < F.lit(delivery_date))
+            .where(F.col("monitoring_status") != "pending")
+            .select(*history_columns)
+            .orderBy("delivery_date")
+            .toPandas()
+        )
+        history = pd.concat([prior_history, current_history], ignore_index=True)
+    else:
+        history = current_history
     run = (
         spark.table(FORECAST_RUN_TABLE)
         .where(F.col("delivery_date") == F.lit(delivery_date))
@@ -194,6 +208,8 @@ def evaluate_day(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--delivery-date", type=date.fromisoformat)
+    parser.add_argument("--start", type=date.fromisoformat)
+    parser.add_argument("--end", type=date.fromisoformat)
     parser.add_argument("--no-fail-on-drift", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(
@@ -204,8 +220,10 @@ def main() -> None:
         return
 
     now = datetime.now(UTC)
-    end = latest_settlement_date(now)
-    start = (end.replace(day=1) - date.resolution).replace(day=1)
+    end = args.end or latest_settlement_date(now)
+    start = args.start or (end.replace(day=1) - date.resolution).replace(day=1)
+    if start > end:
+        raise ValueError("evaluation start cannot be after end")
     spark = DatabricksSession.builder.serverless().getOrCreate()
     failures: list[str] = []
     for delivery_date in _evaluation_dates(spark, start=start, end=end):

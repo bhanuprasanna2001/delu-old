@@ -6,7 +6,12 @@ from unittest import TestCase
 import pytest
 
 from delu.pipeline.bronze import WEATHER_FIELDS, WEATHER_LOCATIONS
-from delu.pipeline.silver import _parse_weather_payload, _weather_value, parse_payload
+from delu.pipeline.silver import (
+    _parse_weather_payload,
+    _weather_value,
+    parse_payload,
+    validate_payload,
+)
 
 
 def payload(
@@ -118,6 +123,18 @@ class ParsePayloadTest(TestCase):
                     "2025-12-31T23:00Z",
                     "2026-01-01T23:00Z",
                     points=((2, 10.0),),
+                ),
+                "de_lu.load.actual",
+                date(2026, 1, 1),
+            )
+
+    def test_non_finite_entsoe_value_is_rejected_before_storage(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non-finite value"):
+            validate_payload(
+                payload(
+                    "2025-12-31T23:00Z",
+                    "2026-01-01T23:00Z",
+                    points=((1, float("nan")),),
                 ),
                 "de_lu.load.actual",
                 date(2026, 1, 1),

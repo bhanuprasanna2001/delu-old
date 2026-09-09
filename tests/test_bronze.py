@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
+import pytest
 import requests
+from entsoe.exceptions import NoMatchingDataError
+from pyspark.sql import SparkSession
 
 from delu.pipeline.bronze import (
     ACTUAL,
+    ALL,
     DEFAULT_START,
     EXAA,
     FORECAST,
@@ -18,47 +22,79 @@ from delu.pipeline.bronze import (
     _fetch_weather,
     _latest_weather_run,
     _planned_requests,
+    _should_retry_immediately,
     _weather_parameters,
+    ingest,
     latest_settlement_date,
 )
 
 
-def test_morning_plan_covers_the_forecast_month_through_tomorrow() -> None:
+def test_morning_plan_fetches_only_tomorrows_inputs() -> None:
     today = date(2026, 9, 7)
 
-    planned, _ = _planned_requests("morning", today=today, start=DEFAULT_START)
+    planned = _planned_requests("morning", today=today, start=DEFAULT_START)
 
     fetched = {(delivery_date, series) for delivery_date, series, *_ in planned}
-    month_start = date(2026, 8, 1)
-    assert len(planned) == (
-        39 * (len(SDAC) + len(EXAA) + len(FORECAST) + len(ACTUAL) + len(WEATHER))
-    )
-    assert {(month_start - date.resolution, series) for series, *_ in SDAC}.issubset(
-        fetched
-    )
-    assert {(month_start, series) for series, *_ in EXAA}.issubset(fetched)
-    assert {
-        (month_start - date.resolution, series) for series, *_ in FORECAST
-    }.issubset(fetched)
-    assert {
-        (month_start - 2 * date.resolution, series) for series, *_ in ACTUAL
-    }.issubset(fetched)
-    assert {(today, series) for series, *_ in SDAC}.issubset(fetched)
-    assert {(today, series) for series, *_ in WEATHER}.issubset(fetched)
-    assert {(month_start - date.resolution, series) for series, *_ in WEATHER}.issubset(
-        fetched
-    )
+    expected = {
+        *(
+            (source_date, series)
+            for source_date in (date(2026, 9, 7), date(2026, 9, 6), date(2026, 9, 1))
+            for series, *_ in SDAC
+        ),
+        *((today + date.resolution, series) for series, *_ in EXAA),
+        *((today, series) for series, *_ in FORECAST),
+        *((today - date.resolution, series) for series, *_ in ACTUAL),
+        *((today, series) for series, *_ in WEATHER),
+    }
+    assert fetched == expected
+    assert len(planned) == len(expected)
 
 
-def test_settlement_plan_refills_previous_and_current_month_gaps() -> None:
+def test_settlement_plan_fetches_only_the_new_result() -> None:
     today = date(2026, 9, 7)
 
-    planned, _ = _planned_requests("settlement", today=today, start=DEFAULT_START)
+    planned = _planned_requests("settlement", today=today, start=DEFAULT_START)
 
     fetched = {(delivery_date, series) for delivery_date, series, *_ in planned}
-    assert len(fetched) == 39 * len(SDAC)
-    assert {(date(2026, 8, 1), series) for series, *_ in SDAC}.issubset(fetched)
-    assert {(date(2026, 9, 8), series) for series, *_ in SDAC}.issubset(fetched)
+    assert fetched == {(date(2026, 9, 8), series) for series, *_ in SDAC}
+
+
+def test_full_plan_uses_the_requested_history_window() -> None:
+    planned = _planned_requests(
+        "full",
+        today=date(2026, 9, 7),
+        start=date(2026, 9, 2),
+        end=date(2026, 9, 4),
+    )
+
+    fetched = {(delivery_date, series) for delivery_date, series, *_ in planned}
+    assert len(fetched) == 3 * (len(ALL) + len(WEATHER))
+    assert {delivery_date for delivery_date, _ in fetched} == {
+        date(2026, 9, 2),
+        date(2026, 9, 3),
+        date(2026, 9, 4),
+    }
+
+
+def test_full_plan_stops_before_the_incomplete_current_day() -> None:
+    planned = _planned_requests(
+        "full",
+        today=date(2026, 9, 7),
+        start=date(2026, 9, 6),
+        end=date(2026, 9, 7),
+    )
+
+    assert {delivery_date for delivery_date, *_ in planned} == {date(2026, 9, 6)}
+
+
+def test_full_plan_rejects_a_reversed_history_window() -> None:
+    with pytest.raises(ValueError, match="start cannot be after end"):
+        _planned_requests(
+            "full",
+            today=date(2026, 9, 7),
+            start=date(2026, 9, 4),
+            end=date(2026, 9, 3),
+        )
 
 
 def test_settlement_date_does_not_roll_forward_before_afternoon() -> None:
@@ -135,3 +171,78 @@ def test_weather_parameters_request_one_model_at_a_time() -> None:
     assert "shortwave_radiation" in primary["hourly"]
     assert fallback["models"] == WEATHER_FALLBACK_MODEL
     assert fallback["hourly"] == "temperature_2m"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        pytest.param(530, True, id="entsoe-530"),
+        pytest.param(599, True, id="entsoe-599"),
+        pytest.param(400, False, id="bad-request"),
+        pytest.param(404, False, id="not-found"),
+    ],
+)
+def test_only_transient_http_errors_are_retried_immediately(
+    status: int, expected: bool
+) -> None:
+    response = Mock(spec=requests.Response)
+    response.status_code = status
+
+    assert _should_retry_immediately(requests.HTTPError(response=response)) is expected
+
+
+def test_ingestion_persists_successes_before_reporting_other_failures(
+    monkeypatch,
+) -> None:
+    payload = """<Publication_MarketDocument>
+      <TimeSeries>
+        <currency_Unit.name>EUR</currency_Unit.name>
+        <price_Measure_Unit.name>MWH</price_Measure_Unit.name>
+        <curveType>A03</curveType>
+        <Period>
+          <timeInterval>
+            <start>2026-09-07T22:00Z</start>
+            <end>2026-09-08T22:00Z</end>
+          </timeInterval>
+          <resolution>PT15M</resolution>
+          <Point><position>1</position><price.amount>50</price.amount></Point>
+        </Period>
+      </TimeSeries>
+    </Publication_MarketDocument>"""
+
+    def query_prices(area, *_args, **_kwargs):
+        if area == "AT":
+            raise NoMatchingDataError
+        return payload
+
+    client = MagicMock()
+    client.query_day_ahead_prices.side_effect = query_prices
+    monkeypatch.setattr(
+        "delu.pipeline.bronze.EntsoeRawClient", Mock(return_value=client)
+    )
+    monkeypatch.setenv("ENTSOE_API_KEY", "test-key")
+
+    existing = MagicMock()
+    existing.where.return_value = existing
+    existing.select.return_value = existing
+    existing.distinct.return_value = existing
+    existing.collect.return_value = []
+    update = MagicMock()
+    spark = MagicMock(spec=SparkSession)
+    spark.catalog.tableExists.return_value = True
+    spark.table.return_value = existing
+    spark.createDataFrame.return_value = update
+
+    with pytest.raises(RuntimeError, match="1 source response"):
+        ingest(
+            "settlement",
+            run_date=date(2026, 9, 7),
+            now=datetime(2026, 9, 7, 13, 0, tzinfo=UTC),
+            workers=2,
+            spark=spark,
+        )
+
+    rows = spark.createDataFrame.call_args.args[0]
+    assert len(rows) == 1
+    assert rows[0][1] == "de_lu.price.sdac"
+    update.write.format.assert_called_once_with("delta")

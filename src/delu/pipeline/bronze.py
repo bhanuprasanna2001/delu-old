@@ -68,11 +68,12 @@ WEATHER_LOCATIONS = (
 WORKERS = 12
 BATCH_DAYS = 7
 SETTLEMENT_CUTOFF = datetime_time(15)
+PRICE_LAGS = (1, 2, 7)
+RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504, 530, 599})
 LOGGER = logging.getLogger(__name__)
 
 Request = tuple[str, str, str, Mapping[str, object]]
 PlannedRequest = tuple[date, str, str, str, Mapping[str, object]]
-RequestKey = tuple[date, str]
 
 SDAC: tuple[Request, ...] = tuple(
     (f"{area.lower()}.price.sdac", "query_day_ahead_prices", area, {"sequence": 1})
@@ -121,7 +122,7 @@ WEATHER: tuple[Request, ...] = tuple(
 
 
 def _latest_weather_run(now: datetime) -> date:
-    if now.tzinfo is None:
+    if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     local = now.astimezone(BERLIN)
     return local.date() - timedelta(days=local.hour < 9)
@@ -129,7 +130,7 @@ def _latest_weather_run(now: datetime) -> date:
 
 def latest_settlement_date(now: datetime) -> date:
     """Return the latest delivery date expected to have published SDAC prices."""
-    if now.tzinfo is None:
+    if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     local = now.astimezone(BERLIN)
     return local.date() + timedelta(days=local.time() >= SETTLEMENT_CUTOFF)
@@ -166,14 +167,23 @@ def _fetch_weather(cell: str, run_date: date) -> str:
     if not isinstance(primary, list):
         raise ValueError("Weather response must be a list of locations")
     try:
-        needs_fallback = any(
-            None in location["hourly"]["temperature_2m"] for location in primary
+        missing_temperatures = sum(
+            value is None
+            for location in primary
+            for value in location["hourly"]["temperature_2m"]
         )
     except (KeyError, TypeError) as exc:
         raise ValueError("Weather response has no hourly temperature data") from exc
 
     fallback = None
-    if needs_fallback:
+    if missing_temperatures:
+        LOGGER.warning(
+            "Using %s for %d missing %s temperature values on %s.",
+            WEATHER_FALLBACK_MODEL,
+            missing_temperatures,
+            cell,
+            run_date,
+        )
         response = requests.get(
             WEATHER_URL,
             params=_weather_parameters(cell, run_date, WEATHER_FALLBACK_MODEL),
@@ -193,83 +203,55 @@ def _planned_requests(
     *,
     today: date,
     start: date,
+    end: date | None = None,
     weather_run_date: date | None = None,
     settlement_date: date | None = None,
-) -> tuple[
-    list[PlannedRequest],
-    set[RequestKey],
-]:
+) -> list[PlannedRequest]:
     weather_run_date = today if weather_run_date is None else weather_run_date
     if mode == "morning":
-        first_delivery_date = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
-        final_delivery_date = today + timedelta(days=1)
-        delivery_dates = (
-            first_delivery_date + timedelta(days=offset)
-            for offset in range((final_delivery_date - first_delivery_date).days + 1)
-        )
-        first_weather_run = first_delivery_date - timedelta(days=1)
-        weather_runs = (
-            first_weather_run + timedelta(days=offset)
-            for offset in range((weather_run_date - first_weather_run).days + 1)
-        )
-        return (
-            [
-                request
-                for delivery_date in delivery_dates
-                for request in (
-                    *((delivery_date - timedelta(days=1), *item) for item in SDAC),
-                    *((delivery_date, *item) for item in EXAA),
-                    *((delivery_date - timedelta(days=1), *item) for item in FORECAST),
-                    *((delivery_date - timedelta(days=2), *item) for item in ACTUAL),
-                )
-            ]
-            + [
-                (run_date, *request) for run_date in weather_runs for request in WEATHER
-            ],
-            set(),
-        )
+        delivery_date = today + timedelta(days=1)
+        return [
+            *(
+                (delivery_date - timedelta(days=lag), *request)
+                for lag in PRICE_LAGS
+                for request in SDAC
+            ),
+            *((delivery_date, *request) for request in EXAA),
+            *((today, *request) for request in FORECAST),
+            *((today - timedelta(days=1), *request) for request in ACTUAL),
+            *((weather_run_date, *request) for request in WEATHER),
+        ]
     if mode == "settlement":
         settlement_date = (
             today + timedelta(days=1) if settlement_date is None else settlement_date
         )
-        first_settlement_date = (
-            settlement_date.replace(day=1) - timedelta(days=1)
-        ).replace(day=1)
-        return (
-            [
-                (first_settlement_date + timedelta(days=offset), *request)
-                for offset in range((settlement_date - first_settlement_date).days + 1)
-                for request in SDAC
-            ],
-            set(),
-        )
+        return [(settlement_date, *request) for request in SDAC]
     if mode == "full":
-        end = today - timedelta(days=1)
-        planned = [
+        if end is not None and start > end:
+            raise ValueError("ingestion start cannot be after end")
+        final_date = min(end or today - timedelta(days=1), today - timedelta(days=1))
+        if start > final_date:
+            return []
+        return [
             (start + timedelta(days=offset), *request)
-            for offset in range((end - start).days + 1)
-            for request in ALL
+            for offset in range((final_date - start).days + 1)
+            for request in (*ALL, *WEATHER)
         ]
-        refresh_days = {end - timedelta(days=offset) for offset in range(3)}
-        refresh = {
-            (delivery_date, series)
-            for delivery_date, series, *_ in planned
-            if delivery_date in refresh_days
-        }
-        planned.extend(
-            (run_date, *request)
-            for offset in range(max(0, (weather_run_date - start).days + 1))
-            for run_date in (start + timedelta(days=offset),)
-            for request in WEATHER
-        )
-        return planned, refresh
     raise ValueError("mode must be full, morning, or settlement")
+
+
+def _should_retry_immediately(exc: Exception) -> bool:
+    if not isinstance(exc, requests.HTTPError):
+        return True
+    return getattr(exc.response, "status_code", None) in RETRYABLE_HTTP_STATUSES
 
 
 def ingest(
     mode: str,
     *,
     start: date = DEFAULT_START,
+    end: date | None = None,
+    run_date: date | None = None,
     now: datetime | None = None,
     workers: int = WORKERS,
     spark: SparkSession | None = None,
@@ -278,9 +260,9 @@ def ingest(
         raise ValueError("workers must be at least 1")
 
     current = datetime.now(UTC) if now is None else now
-    if current.tzinfo is None:
+    if current.tzinfo is None or current.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
-    today = current.astimezone(BERLIN).date()
+    today = run_date or current.astimezone(BERLIN).date()
     spark = (
         spark
         or SparkSession.getActiveSession()
@@ -291,12 +273,17 @@ def ingest(
         spark.createDataFrame([], SCHEMA).write.format("delta").saveAsTable(TABLE)
 
     # Each item is (delivery date or run date, series, method, area, method kwargs).
-    planned, refresh = _planned_requests(
+    planned = _planned_requests(
         mode,
         today=today,
         start=start,
-        weather_run_date=_latest_weather_run(current),
-        settlement_date=latest_settlement_date(current),
+        end=end,
+        weather_run_date=run_date or _latest_weather_run(current),
+        settlement_date=(
+            run_date + timedelta(days=1)
+            if run_date is not None
+            else latest_settlement_date(current)
+        ),
     )
 
     if not planned:
@@ -316,14 +303,14 @@ def ingest(
         .collect()
     }
     planned = [
-        request
-        for request in planned
-        if (request[0], request[1]) in refresh
-        or (request[0], request[1]) not in existing
+        request for request in planned if (request[0], request[1]) not in existing
     ]
     if not planned:
         LOGGER.info("Nothing new to ingest.")
         return 0
+
+    # Import after Bronze is loaded because Silver shares the source definitions above.
+    from delu.pipeline.silver import validate_payload
 
     api_key = None
 
@@ -337,15 +324,17 @@ def ingest(
         for attempt in range(4):
             try:
                 if method == "weather":
-                    return delivery_date, series, _fetch_weather(area, delivery_date)
-                if api_key is None:
-                    raise RuntimeError("ENTSO-E API key is unavailable")
-                client = EntsoeRawClient(
-                    api_key, retry_count=1, retry_delay=0, timeout=60
-                )
-                payload = getattr(client, method)(
-                    area, period_start, period_end, **params
-                )
+                    payload = _fetch_weather(area, delivery_date)
+                else:
+                    if api_key is None:
+                        raise RuntimeError("ENTSO-E API key is unavailable")
+                    client = EntsoeRawClient(
+                        api_key, retry_count=1, retry_delay=0, timeout=60
+                    )
+                    payload = getattr(client, method)(
+                        area, period_start, period_end, **params
+                    )
+                validate_payload(payload, series, delivery_date)
                 return delivery_date, series, payload
             except NoMatchingDataError as exc:
                 raise RuntimeError(
@@ -358,22 +347,26 @@ def ingest(
                 gaierror,
                 RemoteDisconnected,
             ) as exc:
-                status = (
-                    getattr(exc.response, "status_code", None)
-                    if isinstance(exc, requests.HTTPError)
-                    else None
-                )
-                if attempt == 3 or status not in (None, 429, 500, 502, 503, 504, 599):
+                if attempt == 3 or not _should_retry_immediately(exc):
                     raise
                 delay = min(2**attempt, 30) + random.random()
                 LOGGER.warning(
-                    "Retrying %s for %s in %.1fs: %s", series, delivery_date, delay, exc
+                    "Retrying %s for %s in %.1fs after %s.",
+                    series,
+                    delivery_date,
+                    delay,
+                    (
+                        f"HTTP {getattr(exc.response, 'status_code', 'error')}"
+                        if isinstance(exc, requests.HTTPError)
+                        else type(exc).__name__
+                    ),
                 )
                 time.sleep(delay)
 
         raise AssertionError("unreachable")
 
     written = 0
+    failures: list[tuple[date, str, Exception]] = []
     groups = (
         [request for request in planned if request[2] == "weather"],
         [request for request in planned if request[2] != "weather"],
@@ -397,8 +390,22 @@ def ingest(
                 min(workers, len(batch)),
             )
             with ThreadPoolExecutor(max_workers=min(workers, len(batch))) as pool:
-                rows = list(pool.map(fetch, batch))
+                futures = [(request, pool.submit(fetch, request)) for request in batch]
+                rows = []
+                for request, future in futures:
+                    try:
+                        rows.append(future.result())
+                    except Exception as exc:
+                        failures.append((request[0], request[1], exc))
+                        LOGGER.error(
+                            "Could not fetch %s for %s: %s",
+                            request[1],
+                            request[0],
+                            type(exc).__name__,
+                        )
 
+            if not rows:
+                continue
             ingested_at = datetime.now(UTC)
             spark.createDataFrame(
                 [
@@ -409,6 +416,15 @@ def ingest(
             ).write.format("delta").mode("append").saveAsTable(TABLE)
             written += len(rows)
             LOGGER.info("Appended %d raw responses to %s.", len(rows), TABLE)
+    if failures:
+        details = ", ".join(
+            f"{series} on {delivery_date} ({type(exc).__name__})"
+            for delivery_date, series, exc in failures[:5]
+        )
+        raise RuntimeError(
+            f"{len(failures)} source response(s) failed validation or download: "
+            f"{details}"
+        ) from None
     return written
 
 
@@ -418,12 +434,24 @@ def main() -> None:
     )
     parser.add_argument("mode", choices=("full", "morning", "settlement"))
     parser.add_argument("--start", type=date.fromisoformat, default=DEFAULT_START)
+    parser.add_argument("--end", type=date.fromisoformat)
+    parser.add_argument(
+        "--run-date",
+        type=date.fromisoformat,
+        help="Date the scheduled job started, used to make retries deterministic",
+    )
     parser.add_argument("--workers", type=int, default=WORKERS)
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    ingest(args.mode, start=args.start, workers=args.workers)
+    ingest(
+        args.mode,
+        start=args.start,
+        end=args.end,
+        run_date=args.run_date,
+        workers=args.workers,
+    )
 
 
 if __name__ == "__main__":

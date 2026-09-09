@@ -1,46 +1,23 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 
-from delu.ml.predict import _dates_to_forecast
+from delu.ml.predict import forecast_day
 
 
-def test_dates_to_forecast_prioritizes_latest_and_refills_gaps() -> None:
-    complete = {
-        date(2026, 9, 1),
-        date(2026, 9, 2),
-        date(2026, 9, 4),
-        date(2026, 9, 5),
-        date(2026, 9, 7),
-    }
-
-    missing = _dates_to_forecast(
-        date(2026, 9, 1),
-        date(2026, 9, 8),
-        complete,
-    )
-
-    assert missing == (date(2026, 9, 8), date(2026, 9, 3), date(2026, 9, 6))
+def test_production_forecast_rejects_a_historical_delivery_date() -> None:
+    with pytest.raises(ValueError, match="only allowed for tomorrow"):
+        forecast_day(
+            date(2026, 9, 9),
+            now=datetime(2026, 9, 9, 9, 30, tzinfo=UTC),
+        )
 
 
-def test_dates_to_forecast_rejects_reversed_window() -> None:
-    with pytest.raises(ValueError, match="start cannot be after end"):
-        _dates_to_forecast(date(2026, 9, 2), date(2026, 9, 1), set())
-
-
-def test_dates_to_forecast_skips_days_without_complete_gold() -> None:
-    missing = _dates_to_forecast(
-        date(2026, 9, 3),
-        date(2026, 9, 9),
-        {date(2026, 9, 5), date(2026, 9, 8)},
-        {date(2026, 9, day) for day in range(3, 9)},
-    )
-
-    assert missing == (
-        date(2026, 9, 3),
-        date(2026, 9, 4),
-        date(2026, 9, 6),
-        date(2026, 9, 7),
-    )
+def test_production_forecast_rejects_tomorrow_after_publication_cutoff() -> None:
+    with pytest.raises(ValueError, match="cutoff has passed"):
+        forecast_day(
+            date(2026, 9, 10),
+            now=datetime(2026, 9, 9, 13, 0, tzinfo=UTC),
+        )

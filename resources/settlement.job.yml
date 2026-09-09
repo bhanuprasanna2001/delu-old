@@ -32,10 +32,14 @@ resources:
           timeout_seconds: 1800
           max_retries: 6
           min_retry_interval_millis: 3600000
+          retry_on_timeout: true
           python_wheel_task:
             package_name: delu
             entry_point: delu-bronze
-            parameters: [settlement]
+            parameters:
+              - settlement
+              - --run-date
+              - "{{job.start_time.iso_date}}"
         - task_key: silver
           depends_on:
             - task_key: bronze_settlement

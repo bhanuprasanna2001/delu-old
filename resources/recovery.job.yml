@@ -1,20 +1,25 @@
 resources:
   jobs:
-    morning_forecast:
-      name: delu-morning-forecast
-      description: Build D features at 11:30 Europe/Berlin and run batch inference.
+    recovery:
+      name: delu-recovery
+      description: Fill missing validated source dates, then rebuild and evaluate.
       max_concurrent_runs: 1
       queue:
         enabled: true
       schedule:
-        quartz_cron_expression: "0 30 11 * * ?"
+        quartz_cron_expression: "0 0 2 * * ?"
         timezone_id: Europe/Berlin
         pause_status: ${var.schedule_pause_status}
+      parameters:
+        - name: start
+          default: "2025-10-01"
+        - name: end
+          default: "{{job.start_time.iso_date}}"
       health:
         rules:
           - metric: RUN_DURATION_SECONDS
             op: GREATER_THAN
-            value: 3600
+            value: 10800
       email_notifications:
         on_failure:
           - ${workspace.current_user.userName}
@@ -27,24 +32,25 @@ resources:
             dependencies:
               - ../dist/*.whl
       tasks:
-        - task_key: bronze_morning
+        - task_key: bronze_recovery
           environment_key: default
-          timeout_seconds: 1800
-          max_retries: 6
-          min_retry_interval_millis: 1800000
+          timeout_seconds: 7200
+          max_retries: 2
+          min_retry_interval_millis: 3600000
           retry_on_timeout: true
           python_wheel_task:
             package_name: delu
             entry_point: delu-bronze
             parameters:
-              - morning
-              - --run-date
-              - "{{job.start_time.iso_date}}"
-              - --workers
-              - "2"
+              - full
+              - --start
+              - "{{job.parameters.start}}"
+              - --end
+              - "{{job.parameters.end}}"
         - task_key: silver
           depends_on:
-            - task_key: bronze_morning
+            - task_key: bronze_recovery
+          run_if: ALL_DONE
           environment_key: default
           timeout_seconds: 1800
           max_retries: 1
@@ -60,15 +66,16 @@ resources:
           python_wheel_task:
             package_name: delu
             entry_point: delu-gold
-        - task_key: forecast
+        - task_key: evaluate
           depends_on:
             - task_key: gold
           environment_key: default
-          timeout_seconds: 900
-          max_retries: 1
+          timeout_seconds: 1800
           python_wheel_task:
             package_name: delu
-            entry_point: delu-predict
+            entry_point: delu-evaluate
             parameters:
-              - --run-date
-              - "{{job.start_time.iso_date}}"
+              - --start
+              - "{{job.parameters.start}}"
+              - --end
+              - "{{job.parameters.end}}"

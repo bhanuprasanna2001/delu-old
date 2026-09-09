@@ -53,6 +53,7 @@ run together in one service, with credentials kept on the server.
 | :--- | :--- | :--- |
 | Forecast | Daily, 11:30 | Builds inputs and publishes 96 forecasts with prediction intervals. |
 | Settlement | Daily, 15:00 | Fetches published prices and evaluates forecast accuracy and coverage. |
+| Recovery | Daily, 02:00 | Fills gaps, rebuilds Silver and Gold, and evaluates stored forecasts. |
 | Retraining | Monthly, day 3 at 06:00 | Evaluates a candidate model and promotes it if the quality checks pass. |
 
 The model starts with the early EXAA auction price and learns a correction using

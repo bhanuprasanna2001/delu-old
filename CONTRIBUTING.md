@@ -211,6 +211,16 @@ With labeled Gold history available, `databricks bundle run -t prod monthly_trai
 trains and evaluates the initial model. A candidate must pass promotion checks to
 become `@prod` before scheduled forecasting can use it.
 
+The daily `recovery` job fills missing validated source responses and reruns the
+same Silver, Gold, and settlement path. To repair a specific inclusive range, run:
+
+```bash
+databricks bundle run -t prod --params start=2026-09-01,end=2026-09-05 recovery
+```
+
+Do not create forecasts for missed historical days. Those would be retrospective
+predictions, not forecasts that existed before the market result was published.
+
 </details>
 
 <details>

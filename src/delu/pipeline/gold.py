@@ -28,12 +28,11 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-from delu.pipeline.bronze import BERLIN, WEATHER_FIELDS, WEATHER_LOCATIONS
+from delu.pipeline.bronze import BERLIN, PRICE_LAGS, WEATHER_FIELDS, WEATHER_LOCATIONS
 from delu.pipeline.silver import TABLE as SILVER_TABLE
 
 TABLE = "delu.gold.model_input"
 HOLIDAYS_URL = "https://openholidaysapi.org/PublicHolidays"
-PRICE_LAGS = (1, 2, 7)
 QUARTERS_PER_DAY = 96
 KEY = ["delivery_date", "quarter_of_day"]
 
