@@ -70,11 +70,8 @@
   .detail-page { @apply mx-auto w-full max-w-[1664px] px-5 sm:px-10 lg:px-16; animation: appear 350ms ease both; }
   .detail-header { @apply flex h-24 items-center justify-between border-b border-line; }
   .back-button { @apply border border-line bg-surface; }
-  .header-divider { @apply h-5 w-px bg-line; }
-  .market-label { @apply flex items-center gap-2 text-[10px] font-medium tracking-[0.1em] text-muted; }
   .detail-heading { @apply flex flex-wrap items-center justify-between gap-5 pb-7 pt-11; }
   .detail-heading h1 { @apply text-[29px] font-normal tracking-[-0.04em] sm:text-[32px]; }
-  .detail-plot-grid { @apply grid grid-cols-1 lg:grid-cols-[65%_35%]; }
   .price-panel-detail .chart-canvas { height: 305px; }
   .detail-sections { @apply space-y-12 pt-12; }
   .section-heading { @apply mb-5 flex flex-wrap items-center justify-between gap-3; }
@@ -131,6 +128,7 @@
   .fundamental-panel .chart-legend { @apply gap-x-4 pb-0; }
   .inline-note { @apply border-t border-line py-3 text-[11px] text-muted; }
   .site-footer { @apply mt-14 flex flex-wrap items-center justify-between gap-5 border-t border-line py-7 text-[10px] text-muted; }
+  .footer-meta { @apply flex flex-wrap items-center gap-x-5 gap-y-2; }
   .sources-page { @apply max-w-[1100px]; }
   .sources-intro { @apply max-w-2xl py-12 sm:py-16; }
   .sources-intro h1 { @apply mt-3 text-3xl tracking-[-0.04em] sm:text-4xl; }

@@ -56,6 +56,6 @@ export default function Sources() {
       </div>
     </section>
 
-    <footer className="site-footer"><span className="flex items-center gap-2"><Logo className="brand-logo-tiny" /><span>Germany & Luxembourg</span></span><a className="source-link" href="/">Back to forecasts</a></footer>
+    <footer className="site-footer"><Logo className="brand-logo-tiny" /><a className="source-link" href="/">Back to forecasts</a></footer>
   </main>
 }

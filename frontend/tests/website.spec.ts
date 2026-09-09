@@ -104,9 +104,10 @@ test('overview, precise tooltip, detail layout, inputs, generation selector and 
   await expect(page.getByText(/cutoff|on-time monitoring|11:30|15:00/)).toHaveCount(0)
   await expect(page.getByText('90.0%', { exact: true }).first()).toBeVisible()
   if (!isMobile) {
-    const bounds = await page.locator('.detail-plot-grid').boundingBox()
+    const bounds = await page.locator('.metrics-grid').boundingBox()
     const chart = await page.locator('.price-panel-detail').boundingBox()
-    expect(chart!.width / bounds!.width).toBeCloseTo(0.65, 2)
+    expect(chart!.width).toBeCloseTo(bounds!.width, 0)
+    expect(chart!.x).toBeCloseTo(bounds!.x, 0)
   }
   await expect(page.getByRole('cell', { name: '28.00', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Next table page' }).click()

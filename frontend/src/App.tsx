@@ -51,12 +51,12 @@ function ForecastPage() {
 
   if (location.detail) return <main className="detail-page">
     <header className="detail-header">
-      <div className="flex items-center gap-5"><button type="button" className="icon-button back-button" aria-label="Back to overview" onClick={() => navigate(selectedDate ?? '', false)}><ArrowLeft size={17} /></button><a href="/" className="shrink-0" onClick={event => { event.preventDefault(); navigate(selectedDate ?? '', false) }}><Logo className="brand-logo-small" /></a><span className="header-divider" /><span className="hidden text-xs text-muted sm:block">The day ahead, in detail.</span></div>
-      <div className="flex items-center gap-4"><GitHubLink /><span className="market-label">DE <span className="text-line">/</span> LU</span></div>
+      <div className="flex items-center gap-5"><button type="button" className="icon-button back-button" aria-label="Back to overview" onClick={() => navigate(selectedDate ?? '', false)}><ArrowLeft size={17} /></button><a href="/" className="shrink-0" onClick={event => { event.preventDefault(); navigate(selectedDate ?? '', false) }}><Logo className="brand-logo-small" /></a></div>
+      <GitHubLink />
     </header>
     <div className="detail-heading"><div><div className="eyebrow mb-2">The daily perspective</div><h1>{selectedDate ? formatDate(selectedDate) : 'Market overview'}</h1></div>{picker}</div>
     {content}
-    <footer className="site-footer"><span className="flex items-center gap-2"><Logo className="brand-logo-tiny" /><span>Germany & Luxembourg</span></span><span><a className="source-link" href="/sources">Data sources & attribution</a> · All times Europe/Berlin</span></footer>
+    <footer className="site-footer"><Logo className="brand-logo-tiny" /><div className="footer-meta"><a className="source-link" href="/sources">Data sources & attribution</a><span>All times Europe/Berlin</span></div></footer>
   </main>
 
   return <main className="overview-page">
@@ -102,7 +102,7 @@ function DayView({ day, detail, onExpand }: { day: DateSummary; detail: boolean;
 
   if (!detail) return <>{chart}<p className="overview-note">Forecasts and results update as data becomes available · Europe/Berlin</p></>
   return <>
-    <div className="detail-plot-grid">{chart}<div aria-hidden="true" /></div>
+    {chart}
     <Suspense fallback={<Loading>Loading the daily details</Loading>}>
       <Detail day={actualDay} forecast={forecast.data} points={points} features={features.data} featuresError={features.error} retryFeatures={() => void features.mutate()} />
     </Suspense>
