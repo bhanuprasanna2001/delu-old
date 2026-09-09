@@ -1,4 +1,6 @@
-<h1 align="center"><i>delu</i></h1>
+<p align="center">
+  <img src="frontend/public/brand/delu-logo.png" alt="DELU" width="240">
+</p>
 
 <p align="center">
   Electricity price forecasts for Germany and Luxembourg.<br>
