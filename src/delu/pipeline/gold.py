@@ -436,6 +436,9 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build the Gold model-input table")
+    # Recovery job parameters are forwarded to every Python wheel task.
+    parser.add_argument("--start", type=date.fromisoformat, help=argparse.SUPPRESS)
+    parser.add_argument("--end", type=date.fromisoformat, help=argparse.SUPPRESS)
     parser.add_argument(
         "--through",
         type=date.fromisoformat,
