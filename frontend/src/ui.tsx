@@ -4,6 +4,10 @@ import type { ReactNode } from 'react'
 import { dayStatus, formatDate } from './data'
 import type { DateSummary } from './data'
 
+export function Logo({ className = '' }: { className?: string }) {
+  return <img src="/brand/delu-logo.png" alt="DELU" width={1774} height={887} className={`brand-logo ${className}`} />
+}
+
 export function DatePicker({ days, date, onChange }: { days: DateSummary[]; date: string; onChange: (value: string) => void }) {
   const move = (offset: number) => {
     const value = new Date(`${date}T00:00:00Z`)

@@ -1,11 +1,11 @@
 import { ArrowLeft } from 'lucide-react'
-import { GitHubLink } from './ui'
+import { GitHubLink, Logo } from './ui'
 
 export default function Sources() {
   return <main className="detail-page sources-page">
     <title>Data sources & attribution | DELU</title>
     <header className="detail-header">
-      <div className="flex items-center gap-5"><a href="/" className="icon-button back-button" aria-label="Back to forecasts"><ArrowLeft size={17} /></a><a href="/" className="wordmark wordmark-small">DELU</a></div>
+      <div className="flex items-center gap-5"><a href="/" className="icon-button back-button" aria-label="Back to forecasts"><ArrowLeft size={17} /></a><a href="/" className="shrink-0"><Logo className="brand-logo-small" /></a></div>
       <GitHubLink />
     </header>
 
@@ -56,6 +56,6 @@ export default function Sources() {
       </div>
     </section>
 
-    <footer className="site-footer"><span>DELU · Germany & Luxembourg</span><a className="source-link" href="/">Back to forecasts</a></footer>
+    <footer className="site-footer"><span className="flex items-center gap-2"><Logo className="brand-logo-tiny" /><span>Germany & Luxembourg</span></span><a className="source-link" href="/">Back to forecasts</a></footer>
   </main>
 }

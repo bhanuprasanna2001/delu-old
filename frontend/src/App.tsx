@@ -4,7 +4,7 @@ import useSWR from 'swr'
 import Chart, { colors } from './Chart'
 import { dateSchema, datesSchema, fetchData, featuresSchema, forecastSchema, formatDate, formatTimestamp, observationsSchema, percent, pricePoints } from './data'
 import type { DateSummary } from './data'
-import { DataError, DatePicker, GitHubLink, Loading, Status } from './ui'
+import { DataError, DatePicker, GitHubLink, Loading, Logo, Status } from './ui'
 
 const Detail = lazy(() => import('./Detail'))
 const Sources = lazy(() => import('./Sources'))
@@ -51,18 +51,18 @@ function ForecastPage() {
 
   if (location.detail) return <main className="detail-page">
     <header className="detail-header">
-      <div className="flex items-center gap-5"><button type="button" className="icon-button back-button" aria-label="Back to overview" onClick={() => navigate(selectedDate ?? '', false)}><ArrowLeft size={17} /></button><a href="/" className="wordmark wordmark-small" onClick={event => { event.preventDefault(); navigate(selectedDate ?? '', false) }}>DELU</a><span className="header-divider" /><span className="hidden text-xs text-muted sm:block">The day ahead, in detail.</span></div>
+      <div className="flex items-center gap-5"><button type="button" className="icon-button back-button" aria-label="Back to overview" onClick={() => navigate(selectedDate ?? '', false)}><ArrowLeft size={17} /></button><a href="/" className="shrink-0" onClick={event => { event.preventDefault(); navigate(selectedDate ?? '', false) }}><Logo className="brand-logo-small" /></a><span className="header-divider" /><span className="hidden text-xs text-muted sm:block">The day ahead, in detail.</span></div>
       <div className="flex items-center gap-4"><GitHubLink /><span className="market-label">DE <span className="text-line">/</span> LU</span></div>
     </header>
     <div className="detail-heading"><div><div className="eyebrow mb-2">The daily perspective</div><h1>{selectedDate ? formatDate(selectedDate) : 'Market overview'}</h1></div>{picker}</div>
     {content}
-    <footer className="site-footer"><span className="flex items-center gap-2"><span className="wordmark wordmark-tiny">DELU</span><span>Germany & Luxembourg</span></span><span><a className="source-link" href="/sources">Data sources & attribution</a> · All times Europe/Berlin</span></footer>
+    <footer className="site-footer"><span className="flex items-center gap-2"><Logo className="brand-logo-tiny" /><span>Germany & Luxembourg</span></span><span><a className="source-link" href="/sources">Data sources & attribution</a> · All times Europe/Berlin</span></footer>
   </main>
 
   return <main className="overview-page">
     <nav className="overview-nav" aria-label="About DELU"><a className="source-link text-[11px] text-muted" href="/sources">Data sources</a><GitHubLink /></nav>
     <div className="overview-content">
-      <header className="overview-brand"><h1 className="wordmark">DELU</h1><p>Clarity for the day ahead.</p></header>
+      <header className="overview-brand"><h1><Logo /></h1><p>Clarity for the day ahead.</p></header>
       <div className="overview-date">{picker}</div>
       {content}
     </div>

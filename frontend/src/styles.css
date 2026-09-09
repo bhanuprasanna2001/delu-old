@@ -28,16 +28,17 @@
 }
 
 @layer components {
-  .wordmark { font-family: Georgia, 'Times New Roman', serif; font-style: italic; font-weight: 600; font-size: 80px; line-height: 1; letter-spacing: -6px; padding-right: 7px; }
-  .wordmark-small { font-size: 34px; letter-spacing: -2.8px; padding-right: 3px; }
-  .wordmark-tiny { font-size: 21px; letter-spacing: -1.7px; padding-right: 2px; }
+  .brand-logo { display: block; width: 280px; height: auto; flex-shrink: 0; }
+  .brand-logo-small { width: 112px; }
+  .brand-logo-tiny { width: 72px; }
   .overview-page { @apply relative flex min-h-svh items-center justify-center px-5 py-12 sm:px-10; }
   .github-link { @apply inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted hover:bg-paper hover:text-ink; }
   .overview-nav { @apply absolute right-5 top-5 flex items-center gap-4 sm:right-8 sm:top-8; }
   .source-link { @apply underline decoration-line underline-offset-4 hover:text-ink hover:decoration-muted; }
   .overview-content { @apply w-full max-w-[870px]; animation: appear 550ms ease both; }
   .overview-brand { @apply mb-10 text-center; }
-  .overview-brand p { @apply mt-5 text-[11px] tracking-[0.14em] text-muted; }
+  .overview-brand .brand-logo { margin-inline: auto; }
+  .overview-brand p { @apply text-[11px] tracking-[0.14em] text-muted; }
   .overview-date { @apply mb-6 flex min-h-10 justify-center; }
   .date-picker { @apply inline-flex h-10 shrink-0 items-center rounded-full border border-line bg-surface px-1; box-shadow: 0 2px 3px #26372a02; }
   .icon-button { @apply inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted hover:bg-paper hover:text-ink; }
@@ -143,7 +144,7 @@
 
 @keyframes appear { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
 @media (max-width: 640px) {
-  .wordmark:not(.wordmark-small):not(.wordmark-tiny) { font-size: 66px; }
+  .overview-brand .brand-logo { width: 240px; }
   .overview-brand { margin-bottom: 30px; }
   .price-panel { padding-left: 17px; padding-right: 17px; }
   .price-panel-heading { margin-bottom: 22px; }
