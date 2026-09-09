@@ -8,6 +8,8 @@
 <p align="center">
   <a href="#the-project">Overview</a> ·
   <a href="https://delu.bhanuprasanna.com/">Live site</a> ·
+  <a href="MODEL_DATA.md">Model &amp; data</a> ·
+  <a href="EXPERIMENTS.md">Experiments</a> ·
   <a href="#run-locally">Run locally</a> ·
   <a href="#deploy-on-render">Deploy</a> ·
   <a href="CONTRIBUTING.md">Contribute</a>
@@ -60,19 +62,9 @@ The model starts with the early EXAA auction price and learns a correction using
 boosted trees. Calibrated prediction intervals target 90% coverage. Results appear
 after the scheduled jobs complete and the required data is available.
 
-### Weather feature comparison
-
-Both runs were trained through 31 August 2026 and used the same holdout procedure.
-
-| Holdout metric | Without weather | With weather | Change |
-| :--- | ---: | ---: | ---: |
-| Mean absolute error (EUR/MWh) | 8.5751 | 8.5962 | 0.25% worse |
-| Interval score (EUR/MWh) | 66.8717 | 64.8303 | 3.05% better |
-| Coverage | 90.96% | 91.67% | 0.71 pp higher |
-| Mean interval width (EUR/MWh) | 54.03 | 50.50 | 6.53% narrower |
-
-Weather did not improve point accuracy, but it produced narrower intervals with
-better coverage and interval score.
+See [Model and data](MODEL_DATA.md) for exact Bronze-to-Gold lineage and the
+training, prediction, evaluation, and recovery contracts. See
+[Experiments](EXPERIMENTS.md) for offline evidence and reproducible comparisons.
 
 **Reading the charts:** historical dates may contain observations without a stored
 model forecast. Load and generation inputs compare forecasts from the previous day
