@@ -47,8 +47,8 @@ export default function Detail({ day, forecast, points, features, featuresError,
 
     <section aria-label="Daily data">
       <SectionHeading number="02" title={day.has_forecast ? 'Behind the forecast' : 'Market data & inputs'}><span className="section-context">{features ? '96 quarters · Gold dataset' : 'Gold dataset'}</span></SectionHeading>
-      <p className="section-description">{day.has_forecast ? 'The prices and cutoff-safe inputs used for this delivery day.' : 'Historical market prices and the inputs available for this delivery day.'} All prices in EUR/MWh; load and generation in MW.</p>
-      {featuresError && !features ? <DataError error={featuresError} retry={retryFeatures} /> : !features ? <Loading>Loading the daily inputs</Loading> : <InputTable features={features} points={points} />}
+      <p className="section-description">{day.has_forecast ? 'The prices and cutoff-safe inputs used for this delivery day.' : 'Historical market prices and the inputs available for this delivery day.'} Units are shown in the table headings.</p>
+      {featuresError && !features ? <DataError error={featuresError} retry={retryFeatures} /> : !features ? <Loading>Loading the daily inputs</Loading> : <InputTable features={features} points={points} weather={weather.data} />}
     </section>
 
     <section aria-label="Model and downloads">
@@ -90,7 +90,7 @@ export default function Detail({ day, forecast, points, features, featuresError,
   </div>
 }
 
-type Column = { label: string; key: keyof Feature | keyof PricePoint; kind?: 'boolean' | 'text' }
+type Column = { label: string; key: keyof Feature | keyof PricePoint | keyof WeatherQuarter; kind?: 'boolean' | 'text' }
 const tables: Record<string, Column[]> = {
   'Market prices': [
     { label: 'DELU forecast', key: 'forecast' }, { label: 'Actual SDAC', key: 'actual' },
@@ -109,24 +109,31 @@ const tables: Record<string, Column[]> = {
     { label: 'Onshore forecast · previous day', key: 'wind_onshore_day_ahead_forecast_mw' }, { label: 'Onshore actual · two days earlier', key: 'wind_onshore_actual_d_minus_2_mw' },
     { label: 'Offshore forecast · previous day', key: 'wind_offshore_day_ahead_forecast_mw' }, { label: 'Offshore actual · two days earlier', key: 'wind_offshore_actual_d_minus_2_mw' },
   ],
+  Weather: [
+    { label: 'Temperature at 2 m (°C)', key: 'temperature_2m_c' },
+    { label: 'Wind speed at 100 m (m/s)', key: 'wind_speed_100m_m_s' },
+    { label: 'Solar radiation (W/m²)', key: 'shortwave_radiation_w_m2' },
+    { label: 'Cloud cover (%)', key: 'cloud_cover_pct' },
+  ],
   Calendar: [
     { label: 'Day of week (Mon = 0)', key: 'day_of_week' }, { label: 'Month', key: 'month' }, { label: 'Season', key: 'season', kind: 'text' },
     { label: 'Weekend', key: 'is_weekend', kind: 'boolean' }, { label: 'DE nationwide holiday', key: 'is_holiday_de_nationwide', kind: 'boolean' }, { label: 'LU holiday', key: 'is_holiday_lu', kind: 'boolean' },
   ],
 }
 
-function InputTable({ features, points }: { features: Features; points: PricePoint[] }) {
+function InputTable({ features, points, weather }: { features: Features; points: PricePoint[]; weather?: Weather }) {
   const [tab, setTab] = useState('Market prices')
   const [page, setPage] = useState(0)
   const columns = tables[tab]
   const prices = new Map(points.map(point => [point.quarter, point]))
+  const weatherRows = new Map(weather?.quarters.map(row => [row.quarter_of_day, row]))
   const rows = features.rows.toSorted((a, b) => a.quarter_of_day - b.quarter_of_day).slice(page * 8, (page + 1) * 8)
   return <div className="table-panel">
     <div className="table-tabs" aria-label="Input data categories">{Object.keys(tables).map(name => <button type="button" key={name} aria-pressed={name === tab} onClick={() => { setTab(name); setPage(0) }}>{name}</button>)}</div>
     {/* oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- A scrollable table needs keyboard focus. */}
     <section className="table-scroll" tabIndex={0} aria-label={`${tab} data, scroll for more columns`}>
-      <table><caption className="sr-only">{tab} for {features.delivery_date}. Prices in EUR/MWh, load and generation in MW.</caption><thead><tr><th scope="col">Delivery time</th>{columns.map(column => <th scope="col" key={column.key}>{column.label}</th>)}</tr></thead><tbody>{rows.map(feature => {
-        const row = { ...feature, ...prices.get(feature.quarter_of_day) }
+      <table><caption className="sr-only">{tab} for {features.delivery_date}. Units are shown in the column headings.</caption><thead><tr><th scope="col">Delivery time</th>{columns.map(column => <th scope="col" key={column.key}>{column.label}</th>)}</tr></thead><tbody>{rows.map(feature => {
+        const row = { ...feature, ...prices.get(feature.quarter_of_day), ...weatherRows.get(feature.quarter_of_day) }
         return <tr key={feature.quarter_of_day}><th scope="row">{timeRange(feature.quarter_of_day)}</th>{columns.map(column => {
           const value = row[column.key]
           return <td key={column.key} className={column.key === 'forecast' ? 'text-forecast' : ''}>{value == null ? <span className="text-muted">Pending / unavailable</span> : Array.isArray(value) ? `${formatNumber(value[0])} to ${formatNumber(value[1])}` : typeof value === 'boolean' ? value ? 'Yes' : 'No' : typeof value === 'number' ? tab === 'Calendar' ? value : formatNumber(value) : value}</td>
