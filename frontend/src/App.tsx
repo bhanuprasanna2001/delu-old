@@ -7,6 +7,7 @@ import type { DateSummary } from './data'
 import { DataError, DatePicker, GitHubLink, Loading, Status } from './ui'
 
 const Detail = lazy(() => import('./Detail'))
+const Sources = lazy(() => import('./Sources'))
 const readLocation = () => {
   const params = new URLSearchParams(window.location.search)
   const date = dateSchema.safeParse(params.get('date'))
@@ -14,6 +15,11 @@ const readLocation = () => {
 }
 
 export default function App() {
+  if (window.location.pathname === '/sources') return <Suspense fallback={<Loading>Loading data sources</Loading>}><Sources /></Suspense>
+  return <ForecastPage />
+}
+
+function ForecastPage() {
   const [location, setLocation] = useState(readLocation)
   const dates = useSWR('/api/dates?limit=2000', url => fetchData(url, datesSchema), { refreshInterval: 60_000 })
   const defaultDate = dates.data?.find(day => day.has_forecast)?.delivery_date ?? dates.data?.[0]?.delivery_date
@@ -50,11 +56,11 @@ export default function App() {
     </header>
     <div className="detail-heading"><div><div className="eyebrow mb-2">The daily perspective</div><h1>{selectedDate ? formatDate(selectedDate) : 'Market overview'}</h1></div>{picker}</div>
     {content}
-    <footer className="site-footer"><span className="flex items-center gap-2"><span className="wordmark wordmark-tiny">DELU</span><span>Germany & Luxembourg</span></span><span>Source: ENTSO-E · <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Open-Meteo</a> · All times Europe/Berlin</span></footer>
+    <footer className="site-footer"><span className="flex items-center gap-2"><span className="wordmark wordmark-tiny">DELU</span><span>Germany & Luxembourg</span></span><span><a className="source-link" href="/sources">Data sources & attribution</a> · All times Europe/Berlin</span></footer>
   </main>
 
   return <main className="overview-page">
-    <GitHubLink className="overview-github" />
+    <nav className="overview-nav" aria-label="About DELU"><a className="source-link text-[11px] text-muted" href="/sources">Data sources</a><GitHubLink /></nav>
     <div className="overview-content">
       <header className="overview-brand"><h1 className="wordmark">DELU</h1><p>Clarity for the day ahead.</p></header>
       <div className="overview-date">{picker}</div>
@@ -66,7 +72,7 @@ export default function App() {
 function DayView({ day, detail, onExpand }: { day: DateSummary; detail: boolean; onExpand: () => void }) {
   const date = day.delivery_date
   const forecast = useSWR(day.has_forecast ? `/api/forecasts/${date}` : null, url => fetchData(url, forecastSchema), {
-    refreshInterval: data => data?.settled && data.metrics ? 0 : 60_000,
+    refreshInterval: 60_000,
   })
   const observations = useSWR(!day.has_forecast ? `/api/observations/${date}` : null, url => fetchData(url, observationsSchema))
   const features = useSWR(`/api/forecasts/${date}/features`, url => fetchData(url, featuresSchema))

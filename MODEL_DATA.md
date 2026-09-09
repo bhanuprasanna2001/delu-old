@@ -65,8 +65,18 @@ rebuild the downstream state.
 ## Processing and retries
 
 The single `data_pipeline` job runs every 30 minutes in UTC, with one active run
-and no queue of duplicate scheduled work. Its steps are Bronze, Silver, Gold,
-prediction, and evaluation. Schedules are retry opportunities, not deadlines.
+and native Databricks queueing enabled. A trigger arriving during an active run
+waits for capacity. Its steps are Bronze, Silver, Gold, prediction, and evaluation.
+Schedules are retry opportunities, not deadlines.
+
+The single-run limit serializes writes to the same Bronze, Silver, Gold, forecast,
+and metric tables. Raising it would let separate runs rebuild the same derived
+tables concurrently. Databricks queues runs for up to 48 hours; source gaps remain
+pending beyond that and are checked by later runs. The Free Edition's five-task
+account limit counts executing tasks, not the number of steps defined in a job.
+This pipeline's five dependent tasks execute sequentially. See the official
+[queueing documentation](https://docs.databricks.com/aws/en/jobs/configure-job#enable-queueing-of-job-runs)
+and [Free Edition limits](https://docs.databricks.com/aws/en/getting-started/free-edition-limitations).
 
 - Valid source responses are retained even when another API is unavailable.
 - Missing, incomplete, rate-limited, and temporarily unavailable source responses
@@ -82,6 +92,9 @@ prediction, and evaluation. Schedules are retry opportunities, not deadlines.
 Monthly training runs on day 3 at 06:00 Europe/Berlin, using the previous month-end
 as the chronological training boundary. Weather uses the `D-1` 00:00 UTC run.
 The job graphs are defined in [`resources/`](resources/).
+Development deploys the same two job definitions with paused schedules. Both
+targets currently share the `delu` catalog, so dev jobs are not an isolated data
+environment and must not run alongside production writers.
 
 ## Gold features for delivery day `D`
 
@@ -114,10 +127,17 @@ timestamps whose Berlin local date is `D`; Gold expands the hourly values across
 the 96 quarter positions. The five fields are temperature at 2 m, wind speed and
 direction at 100 m, shortwave radiation, and cloud cover.
 
+The API determines availability. There is no 09:00 Europe/Berlin gate: an available
+run is processed, and an unavailable run remains pending for the next attempt.
+
 If primary temperature contains a null, `ecmwf_ifs025` supplies only that missing
 temperature. Other missing weather values leave the response pending for retry. Locations and units are
 defined in [`src/delu/pipeline/bronze.py`](src/delu/pipeline/bronze.py), and parsing
 is implemented in [`src/delu/pipeline/silver.py`](src/delu/pipeline/silver.py).
+
+See [Data sources and attribution](DATA_SOURCES.md) for provider links, licence
+references, and the distinction between per-location model inputs and the
+25-location means displayed on the website.
 
 ## Validation and time semantics
 

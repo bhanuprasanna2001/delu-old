@@ -10,7 +10,7 @@ const metrics = {
   mae: 10, rmse: 12, bias: 1, picp: 0.9, mpiw: 40, interval_score: 50,
   baseline_exaa_mae: 11, baseline_7d_mae: 20, rolling_7d_mae: 9.5,
   rolling_7d_baseline_exaa_mae: 10.5, rolling_28d_picp: 0.89,
-  monitoring_status: 'ok', monitoring_reasons: [], evaluated_at: '2026-09-05T13:05:00Z',
+  monitoring_status: 'ok', monitoring_reasons: [] as string[], evaluated_at: '2026-09-05T13:05:00Z',
 }
 const quarters = Array.from({ length: 96 }, (_, q) => ({
   quarter_of_day: q,
@@ -37,7 +37,7 @@ const weather = Array.from({ length: 96 }, (_, q) => ({
   cloud_cover_pct: 55 + Math.sin(q / 96 * Math.PI * 2) * 30,
 }))
 
-async function mockApi(page: Page, mode: { settled?: boolean; featuresError?: boolean; datesError?: boolean; empty?: boolean } = {}) {
+async function mockApi(page: Page, mode: { settled?: boolean; featuresError?: boolean; datesError?: boolean; empty?: boolean; metrics?: typeof metrics } = {}) {
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url())
     if (url.pathname.includes('/downloads/')) return route.fulfill({
@@ -68,7 +68,7 @@ async function mockApi(page: Page, mode: { settled?: boolean; featuresError?: bo
     } })
     return route.fulfill({ json: {
       delivery_date: day, model_version: '1', predicted_at: '2026-09-04T13:36:00Z', nominal_coverage: 0.9,
-      settled: mode.settled !== false, metrics: mode.settled === false ? null : metrics,
+      settled: mode.settled !== false, metrics: mode.settled === false ? null : mode.metrics ?? metrics,
       quarters: mode.settled === false ? quarters.map(row => ({ ...row, actual_price_eur_per_mwh: null })) : quarters,
     } })
   })
@@ -166,7 +166,7 @@ test('forecast-only data refreshes into settlement without fabricating truth', a
   await expect(page.getByRole('button', { name: 'Actual SDAC', exact: true })).toHaveCount(0)
   await expect(page.getByText('Waiting for actual prices.')).toBeVisible()
   mode.settled = true
-  await page.clock.fastForward(61_000)
+  await page.clock.runFor(61_000)
   await expect(page.getByText('Settled', { exact: true })).toBeVisible()
   await expect(page.getByText('Mean absolute error', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Actual SDAC', exact: true })).toBeVisible()
@@ -207,4 +207,49 @@ test('invalid date links fall back to the latest available date', async ({ page 
   await expect(page.getByRole('button', { name: 'DELU forecast', exact: true })).toBeVisible()
   await expect(page.getByLabel('Delivery date')).toHaveValue('2026-09-05')
   expect(errors).toEqual([])
+})
+
+test('settled evaluations refresh and show each quality alert once', async ({ page }) => {
+  const mode = { metrics: { ...metrics } }
+  await mockApi(page, mode)
+  await page.clock.install()
+  await page.goto('/?date=2026-09-05&view=detail')
+  await expect(page.getByText('Evaluated 05 Sept, 15:05 CEST', { exact: true })).toBeVisible()
+  mode.metrics = { ...metrics, monitoring_status: 'alert', monitoring_reasons: ['seven-day model MAE is worse than the EXAA baseline'], evaluated_at: '2026-09-06T06:00:00Z' }
+  await page.clock.runFor(61_000)
+  await expect(page.getByText('Evaluated 06 Sept, 08:00 CEST', { exact: true })).toBeVisible()
+  await page.getByText('Definitions & rolling performance', { exact: true }).click()
+  await expect(page.getByText(/seven-day model MAE is worse than the EXAA baseline/)).toHaveCount(1)
+})
+
+test('legacy cutoff metadata never becomes a public warning', async ({ page }) => {
+  await mockApi(page, { metrics: { ...metrics, monitoring_status: 'late', monitoring_reasons: ['forecast created outside the D-1 15:00 production cutoff', 'excluded from on-time monitoring'] } })
+  await page.goto('/?date=2026-09-05&view=detail')
+  await expect(page.getByText('Mean absolute error', { exact: true })).toBeVisible()
+  await page.getByText('Definitions & rolling performance', { exact: true }).click()
+  await expect(page.getByText('Published 04 Sept, 15:36 CEST', { exact: true })).toBeVisible()
+  await expect(page.getByText(/cutoff|on-time monitoring|Monitoring: late/)).toHaveCount(0)
+})
+
+test('sources have a direct page and remain accessible when market data is unavailable', async ({ page }) => {
+  const requests: string[] = []
+  page.on('request', request => { if (new URL(request.url()).pathname.startsWith('/api/')) requests.push(request.url()) })
+  await mockApi(page, { datesError: true })
+  await page.goto('/sources')
+  await expect(page).toHaveTitle('Data sources & attribution | DELU')
+  await expect(page.getByRole('heading', { name: 'Data sources & attribution', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'ENTSO-E', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Open-Meteo & ECMWF', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'OpenHolidays', exact: true })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Open-Meteo licence', exact: true })).toHaveAttribute('href', 'https://open-meteo.com/en/license')
+  await expect(page.getByRole('link', { name: 'Open Database Licence (ODbL)', exact: true })).toHaveAttribute('href', 'https://opendatacommons.org/licenses/odbl/1-0/')
+  await expect(page.getByRole('link', { name: 'Terms & free-reuse list', exact: true })).toHaveAttribute('href', /transparencyplatform.zendesk.com/)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.reload()
+  await expect(page.getByRole('heading', { name: 'Data sources & attribution', exact: true })).toBeVisible()
+  expect(requests).toEqual([])
+  await page.getByRole('link', { name: 'Back to forecasts', exact: true }).first().click()
+  await expect(page.getByRole('alert')).toBeVisible()
+  await page.getByRole('link', { name: 'Data sources', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Data sources & attribution', exact: true })).toBeVisible()
 })

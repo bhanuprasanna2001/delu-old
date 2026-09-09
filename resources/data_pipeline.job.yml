@@ -5,7 +5,7 @@ resources:
       description: Retry missing data, build ready days, forecast, and evaluate.
       max_concurrent_runs: 1
       queue:
-        enabled: false
+        enabled: true
       schedule:
         quartz_cron_expression: "0 0/30 * * * ?"
         timezone_id: UTC

@@ -12,7 +12,7 @@ from typing import Annotated, Any, cast
 from databricks import sql
 from databricks.sdk.errors import DatabricksError
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, FiniteFloat
 
@@ -397,6 +397,11 @@ def create_app(
         static_dir if static_dir is not None else Path(__file__).parents[1] / "static"
     )
     if (assets / "index.html").is_file():
+
+        @application.get("/sources", include_in_schema=False)
+        def sources() -> FileResponse:
+            return FileResponse(assets / "index.html")
+
         application.mount("/", StaticFiles(directory=assets, html=True), name="website")
 
     return application

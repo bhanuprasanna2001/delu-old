@@ -25,6 +25,7 @@ local data or mocks and do not require credentials.
 | Location | Responsibility |
 | :--- | :--- |
 | [frontend/src/](frontend/src/) | React views, charts, styles, and API data handling |
+| [DATA_SOURCES.md](DATA_SOURCES.md) and [frontend/src/Sources.tsx](frontend/src/Sources.tsx) | Provider attribution, usage terms, and data transformations |
 | [app/delu_app/](app/delu_app/) | FastAPI routes and read-only Databricks access |
 | [src/delu/pipeline/](src/delu/pipeline/) | Raw ingestion (Bronze), cleanup (Silver), and model inputs (Gold) |
 | [src/delu/ml/](src/delu/ml/) | Training, prediction, evaluation, and monitoring |
@@ -46,6 +47,8 @@ Keep these project rules intact:
   when changing the UI.
 - Keep credentials, datasets, and model artifacts out of commits. Let the package
   manager update lockfiles; do not hand-edit generated output.
+- Update both attribution references when a source or transformation changes.
+  Keep a linked Open-Meteo credit beside displayed weather data.
 
 ## 3. Verify your change
 
@@ -144,6 +147,7 @@ After deployment, open these paths on the assigned public URL:
 | `/api/dates?limit=1` | Warehouse access and the latest available date. |
 | `/api/model` | Access to the exported model metadata. |
 | `/docs` | Interactive reference for every API endpoint. |
+| `/sources` | Directly accessible source attribution page; no warehouse query. |
 
 Then open a day in the website and try the Gold CSV and model ZIP downloads.
 `/api/health` provides forecast and settlement freshness through a database query.
@@ -178,13 +182,14 @@ databricks bundle validate --strict -t dev
 databricks bundle validate --strict -t prod
 ```
 
-**2. Deploy the target you intend to update.**
+**2. Deploy and start each environment included in the release.**
 
 For development:
 
 ```bash
 databricks bundle deploy -t dev
 databricks bundle run -t dev api
+databricks bundle summary -t dev
 ```
 
 For a production release:
@@ -198,6 +203,12 @@ databricks bundle summary -t prod
 A bundle deployment updates its configured jobs and resources as well as the app
 source. Keep dev schedules paused to avoid duplicate processing. Dev uses
 `model_exports_dev`; production uses `model_exports` and active schedules.
+Deploy both targets when changing shared job definitions so dev also replaces
+obsolete jobs. Deploying the bundle does not run the data or training jobs.
+Verify the deployed job's queue is enabled, maximum concurrent runs is one,
+and schedule is paused in dev and active in prod. Check each app with
+`databricks apps get delu-api-dev` or `databricks apps get delu-api-prod`, using
+the configured profile, and confirm its `app_status.state` is `RUNNING`.
 
 The ingestion jobs require the ENTSO-E API key. If its secret scope has not been
 configured, create it once and enter the key when prompted:
@@ -226,6 +237,23 @@ first published forecast (or the model's registration date on first use), and
 evaluation checks all stored forecasts. Published forecasts retain their original
 values and timestamps; newly backfilled predictions record their actual creation
 time and the model version used.
+
+An overlapping trigger is queued behind the active run. Keep native queueing
+enabled and the single-run limit in the bundle: Silver and Gold rebuild shared
+tables, so parallel runs would compete over the same output. A queued run checks
+current data when it starts. If the platform expires a queued run after its
+48-hour limit, the source gaps are still picked up by subsequent scheduled runs.
+Use the production job for shared-catalog backfills, rather than starting a
+parallel dev job. The Free Edition account limit of five concurrent tasks is
+separate from this job's concurrency setting; see [processing and retries](MODEL_DATA.md#processing-and-retries).
+
+Inspect a successful run's individual tasks and logs as well as its overall
+status. A successful run can still be waiting for unpublished source data.
+Validate availability with `/api/dates` and `/api/health`, then inspect a forecast
+and its evaluation on the website. Settled evaluations refresh each minute, so
+backfilled rolling metrics can update without reopening the page. Historical
+`late` metrics are recomputed by evaluation; the UI shows quality alerts once
+and does not display retired cutoff labels.
 
 </details>
 

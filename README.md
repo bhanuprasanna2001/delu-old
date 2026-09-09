@@ -9,6 +9,7 @@
   <a href="#the-project">Overview</a> ·
   <a href="https://delu.bhanuprasanna.com/">Live site</a> ·
   <a href="MODEL_DATA.md">Model &amp; data</a> ·
+  <a href="DATA_SOURCES.md">Data sources</a> ·
   <a href="EXPERIMENTS.md">Experiments</a> ·
   <a href="#run-locally">Run locally</a> ·
   <a href="#deploy-on-render">Deploy</a> ·
@@ -36,6 +37,8 @@ with published Single Day-Ahead Coupling (SDAC) prices when results are availabl
 - **Follow the results.** See actual prices and model performance as they arrive.
 - **Take the data with you.** Download the production model and Gold dataset, the
   cleaned data used by the forecasting pipeline.
+- **Trace the sources.** Open the dedicated [attribution page](https://delu.bhanuprasanna.com/sources)
+  for providers, usage terms, and the transformations behind the displayed data.
 
 ## How it works
 
@@ -60,6 +63,13 @@ Missing data stays pending. Each run retries the missing source responses across
 history, including gaps lasting several days. Existing forecasts keep their
 original values and publication timestamps. A delayed forecast is evaluated in
 the same way once its actual prices are available.
+
+If a scheduled run arrives while the pipeline is busy, Databricks queues it.
+One run writes the shared tables at a time. The next run checks the remaining
+gaps, so a delayed API response does not require a separate recovery workflow.
+The website refreshes forecasts and evaluation results every minute, including
+settled days whose rolling metrics change after a backfill. Publication time is
+shown as recorded; monitoring messages describe model quality only.
 
 The model starts with the early EXAA auction price and learns a correction using
 boosted trees. Calibrated prediction intervals target 90% coverage. Results appear
@@ -126,13 +136,13 @@ the website displays a loading message while you wait.
 1. Click **Deploy to Render** and connect the GitHub repository.
 2. Enter `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET`. The remaining values
    are provided by [render.yaml](render.yaml).
-3. Review the selected **paid plan**, then click **Deploy**. Open the public
+3. Review the service plan in the blueprint, then click **Deploy**. Open the public
    `onrender.com` URL once the service is live.
 
 Visitors do not need a Databricks account. Data, training, and scheduled jobs stay
 in Databricks. Later commits deploy after GitHub checks pass.
 
-The configured service uses Frankfurt and a paid plan to avoid idle sleep. For
+The blueprint currently selects the Free plan in Frankfurt. For
 connection permissions, deployment checks, and the authenticated Databricks Apps
 option, see the [contributing guide](CONTRIBUTING.md#deployment-reference).
 
@@ -146,3 +156,6 @@ Built with React, Vite, TypeScript, Tailwind CSS, FastAPI, and Databricks.
 Market data comes from [ENTSO-E](https://transparency.entsoe.eu/), weather data
 from [Open-Meteo](https://open-meteo.com/), and holiday data from
 [OpenHolidays](https://www.openholidaysapi.org/).
+Provider credits, licences, and data transformations are documented in
+[DATA_SOURCES.md](DATA_SOURCES.md) and on the website's
+[Data sources & attribution page](https://delu.bhanuprasanna.com/sources).

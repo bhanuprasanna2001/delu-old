@@ -236,10 +236,11 @@ def test_website_mount_preserves_api_and_missing_asset_responses(
     store.dates.return_value = []
     (tmp_path / "index.html").write_text("<html><body>DELU</body></html>")
 
-    homepage, dates, missing_api, missing_asset = asyncio.run(
+    homepage, sources, dates, missing_api, missing_asset = asyncio.run(
         get(
             create_app(store, static_dir=tmp_path),
             "/",
+            "/sources",
             "/api/dates",
             "/api/missing",
             "/assets/missing.js",
@@ -248,6 +249,8 @@ def test_website_mount_preserves_api_and_missing_asset_responses(
 
     assert homepage.status_code == 200
     assert "DELU" in homepage.text
+    assert sources.status_code == 200
+    assert sources.text == homepage.text
     assert dates.json() == []
     assert missing_api.status_code == 404
     assert missing_api.json() == {"detail": "API endpoint not found"}

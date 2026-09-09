@@ -38,9 +38,8 @@ export default function Detail({ day, forecast, points, features, featuresError,
         </div>)}</div>
         <details className="metric-details"><summary>Definitions & rolling performance</summary><div className="mt-5 grid gap-x-12 gap-y-4 md:grid-cols-2 xl:grid-cols-3">{metricDefinitions.map(item => <p key={item.key}><strong>{item.label}.</strong> {item.note}</p>)}</div>
           <div className="mt-5 border-t border-line pt-4">EXAA baseline MAE: <strong>{formatNumber(metrics.baseline_exaa_mae)} EUR/MWh</strong> · 7-day rolling MAE: <strong>{formatNumber(metrics.rolling_7d_mae)} EUR/MWh</strong> · 28-day rolling coverage: <strong>{percent(metrics.rolling_28d_picp)}</strong></div>
-          <p className="mt-2">Monitoring: {metrics.monitoring_status}{metrics.monitoring_reasons.length ? ` · ${metrics.monitoring_reasons.join(' · ')}` : ''}</p>
         </details>
-        {metrics.monitoring_reasons.length ? <p aria-live="polite" className="inline-note text-warning">Model monitoring: {metrics.monitoring_reasons.join(' · ')}</p> : null}
+        {metrics.monitoring_status === 'alert' && metrics.monitoring_reasons.length ? <p aria-live="polite" className="inline-note text-warning">Model monitoring: {metrics.monitoring_reasons.join(' · ')}</p> : null}
       </> : <div className="settlement-notice"><Clock3 size={20} className="shrink-0 text-muted" /><div><h3>{!day.has_forecast ? 'No forecast has been published for this day.' : day.settled ? 'Prices are settled. Evaluation is pending.' : 'Waiting for actual prices.'}</h3><p>{!day.has_forecast ? 'Market prices and inputs are available. Performance metrics appear when a forecast and actual prices are both available.' : 'The pipeline checks again automatically. Actual prices and evaluation results appear as the data becomes available.'}</p></div></div>}
     </section>
 
@@ -48,6 +47,7 @@ export default function Detail({ day, forecast, points, features, featuresError,
       <SectionHeading number="02" title={day.has_forecast ? 'Behind the forecast' : 'Market data & inputs'}><span className="section-context">{features ? '96 quarters · Gold dataset' : 'Gold dataset'}</span></SectionHeading>
       <p className="section-description">{day.has_forecast ? 'The prices and model inputs for this delivery day.' : 'Historical market prices and the inputs available for this delivery day.'} Units are shown in the table headings.</p>
       {featuresError && !features ? <DataError error={featuresError} retry={retryFeatures} /> : !features ? <Loading>Loading the daily inputs</Loading> : <InputTable features={features} points={points} weather={weather.data} />}
+      <p className="mt-3 text-[10px] text-muted">Market data: ENTSO-E · Weather: <a className="source-link" href="https://open-meteo.com/" target="_blank" rel="noreferrer">Open-Meteo</a> / ECMWF · Calendar: OpenHolidays · <a className="source-link" href="/sources">Data sources & attribution</a></p>
     </section>
 
     <section aria-label="Model and downloads">
@@ -69,7 +69,7 @@ export default function Detail({ day, forecast, points, features, featuresError,
           <div className="flex items-start justify-between gap-4"><span className="download-icon"><Database size={20} strokeWidth={1.4} /></span><span className="small-tag">Gold dataset</span></div>
           <h3>The full picture, down to every quarter hour.</h3>
           <p>Download the complete Gold dataset, including market prices, load, renewable generation, weather, and calendar features.</p>
-          <dl className="model-facts"><div><dt>Resolution</dt><dd>15 minutes</dd></div><div><dt>Daily grid</dt><dd>96 normalized quarters</dd></div><div><dt>Source</dt><dd>ENTSO-E · OpenHolidays · <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Open-Meteo</a></dd></div><div><dt>Format</dt><dd>CSV, with column headers</dd></div></dl>
+          <dl className="model-facts"><div><dt>Resolution</dt><dd>15 minutes</dd></div><div><dt>Daily grid</dt><dd>96 normalized quarters</dd></div><div><dt>Sources & terms</dt><dd><a className="source-link" href="/sources">Data sources & attribution</a></dd></div><div><dt>Format</dt><dd>CSV, with column headers</dd></div></dl>
           <div className="download-panel-footer"><DownloadButton href="/api/downloads/gold.csv" filename="delu-gold.csv">Download dataset <span className="file-type">CSV</span></DownloadButton><span className="text-[10px] text-muted">All available dates</span></div>
         </div>
       </div>
@@ -83,7 +83,7 @@ export default function Detail({ day, forecast, points, features, featuresError,
 
     <section aria-label="Weather plots">
       <SectionHeading number="05" title="Weather outlook"><span className="section-context">{weather.data ? `${weather.data.location_count}-point grid mean · run ${formatDate(weather.data.model_run_date, 'short')}` : 'Open-Meteo · ECMWF IFS'}</span></SectionHeading>
-      <p className="section-description">Weather forecasts for the delivery day from the previous 00Z model run.</p>
+      <p className="section-description">Weather forecasts for the delivery day from the previous 00Z model run. Weather data by <a className="source-link" href="https://open-meteo.com/" target="_blank" rel="noreferrer">Open-Meteo</a>, using ECMWF IFS.</p>
       {weather.error && !weather.data ? <DataError error={weather.error} retry={() => void weather.mutate()} /> : !weather.data ? <Loading>Loading weather outlook</Loading> : <WeatherPlots weather={weather.data} />}
     </section>
   </div>

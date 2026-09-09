@@ -33,7 +33,8 @@
   .wordmark-tiny { font-size: 21px; letter-spacing: -1.7px; padding-right: 2px; }
   .overview-page { @apply relative flex min-h-svh items-center justify-center px-5 py-12 sm:px-10; }
   .github-link { @apply inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted hover:bg-paper hover:text-ink; }
-  .overview-github { @apply absolute right-5 top-5 sm:right-8 sm:top-8; }
+  .overview-nav { @apply absolute right-5 top-5 flex items-center gap-4 sm:right-8 sm:top-8; }
+  .source-link { @apply underline decoration-line underline-offset-4 hover:text-ink hover:decoration-muted; }
   .overview-content { @apply w-full max-w-[870px]; animation: appear 550ms ease both; }
   .overview-brand { @apply mb-10 text-center; }
   .overview-brand p { @apply mt-5 text-[11px] tracking-[0.14em] text-muted; }
@@ -129,6 +130,15 @@
   .fundamental-panel .chart-legend { @apply gap-x-4 pb-0; }
   .inline-note { @apply border-t border-line py-3 text-[11px] text-muted; }
   .site-footer { @apply mt-14 flex flex-wrap items-center justify-between gap-5 border-t border-line py-7 text-[10px] text-muted; }
+  .sources-page { @apply max-w-[1100px]; }
+  .sources-intro { @apply max-w-2xl py-12 sm:py-16; }
+  .sources-intro h1 { @apply mt-3 text-3xl tracking-[-0.04em] sm:text-4xl; }
+  .sources-intro p { @apply mt-5 text-sm leading-7 text-muted; }
+  .source-section { @apply grid gap-5 border-t border-line py-9 sm:grid-cols-[200px_1fr] sm:gap-10; }
+  .source-section h2 { @apply mt-2 text-lg font-medium tracking-[-0.025em]; }
+  .source-copy { @apply space-y-4 text-xs leading-6 text-muted; }
+  .source-copy strong { @apply font-medium text-ink; }
+  .source-links { @apply flex flex-wrap gap-x-5 gap-y-1 pt-1; }
 }
 
 @keyframes appear { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
