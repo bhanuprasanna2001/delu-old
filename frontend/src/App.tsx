@@ -62,7 +62,7 @@ function ForecastPage() {
   return <main className="overview-page">
     <nav className="overview-nav" aria-label="About DELU"><a className="source-link text-[11px] text-muted" href="/sources">Data sources</a><GitHubLink /></nav>
     <div className="overview-content">
-      <header className="overview-brand"><h1><Logo /></h1><p>Clarity for the day ahead.</p></header>
+      <header className="overview-brand"><h1><Logo /></h1></header>
       <div className="overview-date">{picker}</div>
       {content}
     </div>
