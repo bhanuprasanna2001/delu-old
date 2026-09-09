@@ -164,7 +164,7 @@ def prepare_daily_data(
     target = pd.to_numeric(data[TARGET_COLUMN], errors="coerce")
     target_counts = target.notna().groupby(data["delivery_date"], sort=False).sum()
     partial = target_counts.between(1, QUARTERS_PER_DAY - 1)
-    if partial.any():
+    if require_targets and partial.any():
         raise ValueError(
             "Gold contains partially observed target days: "
             f"{target_counts.loc[partial].to_dict()}"

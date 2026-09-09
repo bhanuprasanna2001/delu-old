@@ -41,7 +41,7 @@ Keep these project rules intact:
 - Evaluate models in time order. Never present training-set predictions as
   historical production forecasts.
 - Show actual prices and metrics only when the stored results exist. Label
-  retrospective runs and the delivery dates of load and generation inputs clearly.
+  actual publication timestamps and the delivery dates of load and generation inputs clearly.
 - Check keyboard access, chart tooltips, mobile layouts, and loading/error states
   when changing the UI.
 - Keep credentials, datasets, and model artifacts out of commits. Let the package
@@ -211,15 +211,21 @@ With labeled Gold history available, `databricks bundle run -t prod monthly_trai
 trains and evaluates the initial model. A candidate must pass promotion checks to
 become `@prod` before scheduled forecasting can use it.
 
-The daily `recovery` job fills missing validated source responses and reruns the
-same Silver, Gold, and settlement path. To repair a specific inclusive range, run:
+The `data_pipeline` job runs every 30 minutes. It fetches missing source responses,
+rebuilds complete Silver and Gold data, fills missing forecasts, and evaluates
+available actual prices. Missing or temporarily unavailable data stays pending for
+the next run; it has no expiry. To backfill a specific inclusive delivery range:
 
 ```bash
-databricks bundle run -t prod --params start=2026-09-01,end=2026-09-05 recovery
+databricks bundle run -t prod --params start=2026-09-01,end=2026-09-05 data_pipeline
 ```
 
-Do not create forecasts for missed historical days. Those would be retrospective
-predictions, not forecasts that existed before the market result was published.
+The same job fetches lagged inputs for the requested range. Without explicit
+bounds, ingestion checks the full source history, prediction fills gaps from the
+first published forecast (or the model's registration date on first use), and
+evaluation checks all stored forecasts. Published forecasts retain their original
+values and timestamps; newly backfilled predictions record their actual creation
+time and the model version used.
 
 </details>
 
@@ -245,8 +251,9 @@ are ignored by Git. Production versions are registered as `delu.ml.sdac_cqr`, wi
 
 Settlement provides the feedback: released prices are joined to stored forecasts
 to calculate MAE, RMSE, bias, interval coverage, interval width, and interval score.
-Rolling error and coverage checks can fail the job and trigger native Databricks
-email notifications. Settled data becomes history for subsequent training.
+Rolling error and coverage checks are recorded alongside the metrics without
+blocking data processing. Unexpected code, configuration, and authentication
+failures still fail the job and trigger native Databricks notifications. Settled data becomes history for subsequent training.
 
 Method references:
 [electricity price forecasting and temporal evaluation](https://doi.org/10.1016/j.apenergy.2021.116983)

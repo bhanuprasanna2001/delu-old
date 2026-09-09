@@ -51,19 +51,22 @@ Databricks prepares the data, trains the model, and stores forecasts. FastAPI re
 those results; React displays them in the browser. On Render, the website and API
 run together in one service, with credentials kept on the server.
 
-| Scheduled job | Time in Europe/Berlin | What it does |
+| Scheduled job | Frequency | What it does |
 | :--- | :--- | :--- |
-| Forecast | Daily, 11:30 | Builds inputs and publishes 96 forecasts with prediction intervals. |
-| Settlement | Daily, 15:00 | Fetches published prices and evaluates forecast accuracy and coverage. |
-| Recovery | Daily, 02:00 | Fills gaps, rebuilds Silver and Gold, and evaluates stored forecasts. |
-| Retraining | Monthly, day 3 at 06:00 | Evaluates a candidate model and promotes it if the quality checks pass. |
+| Data pipeline | Every 30 minutes | Fetches missing data, builds complete days, publishes missing forecasts, and evaluates available actual prices. |
+| Retraining | Monthly, day 3 at 06:00 Europe/Berlin | Evaluates a candidate model and promotes it if the quality checks pass. |
+
+Missing data stays pending. Each run retries the missing source responses across
+history, including gaps lasting several days. Existing forecasts keep their
+original values and publication timestamps. A delayed forecast is evaluated in
+the same way once its actual prices are available.
 
 The model starts with the early EXAA auction price and learns a correction using
 boosted trees. Calibrated prediction intervals target 90% coverage. Results appear
 after the scheduled jobs complete and the required data is available.
 
 See [Model and data](MODEL_DATA.md) for exact Bronze-to-Gold lineage and the
-training, prediction, evaluation, and recovery contracts. See
+training, prediction, evaluation, and backfill behavior. See
 [Experiments](EXPERIMENTS.md) for offline evidence and reproducible comparisons.
 
 **Reading the charts:** historical dates may contain observations without a stored

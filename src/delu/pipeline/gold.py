@@ -1,4 +1,4 @@
-"""Build the small, cutoff-oriented model-input table from Silver."""
+"""Build complete model-input days as their source data becomes available."""
 
 from __future__ import annotations
 
@@ -6,17 +6,11 @@ import argparse
 import json
 import logging
 from datetime import UTC, date, datetime, time, timedelta
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-import great_expectations as gx
-import pandas as pd
 from databricks.connect import DatabricksSession
-from great_expectations.expectations import (
-    ExpectColumnDistinctValuesToContainSet,
-    ExpectColumnValuesToBeInSet,
-)
-from great_expectations.expectations.expectation import Expectation
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -28,7 +22,13 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-from delu.pipeline.bronze import BERLIN, PRICE_LAGS, WEATHER_FIELDS, WEATHER_LOCATIONS
+from delu.pipeline.bronze import (
+    BERLIN,
+    PRICE_LAGS,
+    RETRYABLE_HTTP_STATUSES,
+    WEATHER_FIELDS,
+    WEATHER_LOCATIONS,
+)
 from delu.pipeline.silver import TABLE as SILVER_TABLE
 
 TABLE = "delu.gold.model_input"
@@ -88,49 +88,11 @@ HOLIDAY_SCHEMA = StructType(
 )
 
 
-def _ge_check(frame: pd.DataFrame, expectation: Expectation, label: str) -> None:
-    context = gx.get_context(mode="ephemeral")
-    source = context.data_sources.add_pandas(name=f"{label}_source")
-    asset = source.add_dataframe_asset(name=f"{label}_asset")
-    definition = asset.add_batch_definition_whole_dataframe("whole")
-    batch = definition.get_batch(batch_parameters={"dataframe": frame})
-    result = batch.validate(expectation)
-    if not result.success:
-        raise ValueError(f"Silver validation failed: {label}")
-
-
 def _validate_silver(silver: DataFrame) -> None:
-    """Run the two useful Silver checks and nothing more."""
+    """Reject invalid measurements without requiring every source to be present."""
     invalid = F.col("value").isNull() | F.isnan("value")
-    stats = silver.agg(
-        F.count("*").alias("rows"),
-        F.sum(invalid.cast("long")).alias("invalid_measurements"),
-    ).first()
-    if stats is None:
-        raise ValueError("Silver validation returned no result")
-    invalid_count = int(stats.invalid_measurements or 0)
-    _ge_check(
-        pd.DataFrame({"invalid_measurements": [invalid_count]}),
-        ExpectColumnValuesToBeInSet(
-            column="invalid_measurements",  # ty: ignore[unknown-argument]
-            value_set=[0],  # ty: ignore[unknown-argument]
-        ),
-        "silver_values",
-    )
-
-    observed = [
-        row.series
-        for row in silver.select("series").distinct().collect()
-        if row.series is not None
-    ]
-    _ge_check(
-        pd.DataFrame({"series": observed}),
-        ExpectColumnDistinctValuesToContainSet(
-            column="series",  # ty: ignore[unknown-argument]
-            value_set=list(REQUIRED_SERIES),  # ty: ignore[unknown-argument]
-        ),
-        "silver_series",
-    )
+    if silver.where(invalid).limit(1).count():
+        raise ValueError("Silver contains null or NaN measurements")
 
 
 def _normalise_intervals(silver: DataFrame) -> DataFrame:
@@ -249,7 +211,7 @@ def _calendar_frame(spark: SparkSession, start: date, end: date) -> DataFrame:
     return (
         frame.withColumn("hour", (F.col("quarter_of_day") / 4).cast("int"))
         .withColumn("quarter", F.col("quarter_of_day") % 4)
-        .withColumn("day_of_week", F.dayofweek("delivery_date") - 2)
+        .withColumn("day_of_week", F.pmod(F.dayofweek("delivery_date") + 5, F.lit(7)))
         .withColumn("month", F.month("delivery_date"))
         .withColumn("is_weekend", F.col("day_of_week") >= 5)
         .withColumn(
@@ -326,6 +288,9 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
         or DatabricksSession.builder.serverless().getOrCreate()
     )
     spark.conf.set("spark.sql.session.timeZone", "UTC")
+    if not spark.catalog.tableExists(SILVER_TABLE):
+        LOGGER.info("Waiting for source measurements.")
+        return
     silver = spark.table(SILVER_TABLE)
     _validate_silver(silver)
     intervals = _normalise_intervals(silver)
@@ -378,21 +343,40 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
     result = result.where(F.col("delivery_date") <= F.lit(through)).dropna(
         subset=list(FEATURE_COLUMNS)
     )
+    result = (
+        result.withColumn(
+            "_quarters", F.count("*").over(Window.partitionBy("delivery_date"))
+        )
+        .where(F.col("_quarters") == 96)
+        .drop("_quarters")
+    )
     bounds = result.agg(
         F.min("delivery_date").alias("start"), F.max("delivery_date").alias("end")
     ).first()
     if bounds is None or bounds.start is None or bounds.end is None:
-        raise ValueError("No complete D-1 feature rows are available")
+        LOGGER.info("Waiting for complete model inputs. Stored Gold data is preserved.")
+        return
+
+    try:
+        holidays = _holiday_frame(spark, bounds.start, bounds.end)
+    except HTTPError as exc:
+        if exc.code not in RETRYABLE_HTTP_STATUSES | {404}:
+            raise
+        LOGGER.warning(
+            "Waiting for holiday data (HTTP %s). Will retry next run.", exc.code
+        )
+        return
+    except URLError as exc:
+        LOGGER.warning(
+            "Waiting for holiday data (%s). Will retry next run.", exc.reason
+        )
+        return
 
     result = (
         result.join(_calendar_frame(spark, bounds.start, bounds.end), KEY, "inner")
-        .join(_holiday_frame(spark, bounds.start, bounds.end), "delivery_date", "left")
+        .join(holidays, "delivery_date", "left")
         .fillna({"is_holiday_de_nationwide": False, "is_holiday_lu": False})
     )
-
-    bad_days = result.groupBy("delivery_date").count().where(F.col("count") != 96)
-    if bad_days.limit(1).count():
-        raise ValueError("Gold must contain 96 local quarters per delivery date")
 
     output_columns = [
         "delivery_date",
@@ -436,9 +420,9 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build the Gold model-input table")
-    # Recovery job parameters are forwarded to every Python wheel task.
-    parser.add_argument("--start", type=date.fromisoformat, help=argparse.SUPPRESS)
-    parser.add_argument("--end", type=date.fromisoformat, help=argparse.SUPPRESS)
+    # Backfill bounds select work in Bronze, prediction, and evaluation.
+    parser.add_argument("--start", help=argparse.SUPPRESS)
+    parser.add_argument("--end", help=argparse.SUPPRESS)
     parser.add_argument(
         "--through",
         type=date.fromisoformat,

@@ -104,3 +104,12 @@ def test_walk_forward_split_expands_training_before_untouched_test() -> None:
         data.dates[8:10],
     ]
     assert split.test.dates == data.dates[10:]
+
+
+def test_forecasting_does_not_wait_for_partially_published_targets() -> None:
+    frame = gold_frame(1)
+    frame.loc[0, TARGET_COLUMN] = np.nan
+    daily = prepare_daily_data(frame, require_targets=False)
+    assert len(daily) == 1
+    assert daily.targets is None
+    assert np.isfinite(daily.features).all()

@@ -477,7 +477,13 @@ def build(spark: SparkSession | None = None) -> None:
         or DatabricksSession.builder.serverless().getOrCreate()
     )
     spark.conf.set("spark.sql.session.timeZone", "UTC")
+    if not spark.catalog.tableExists(BRONZE_TABLE):
+        LOGGER.info("Waiting for source data.")
+        return
     raw = spark.table(BRONZE_TABLE)
+    if raw.limit(1).count() == 0:
+        LOGGER.info("Waiting for source data. Stored Silver data is preserved.")
+        return
     _validate_raw(raw)
 
     spark.sql("CREATE SCHEMA IF NOT EXISTS delu.silver")

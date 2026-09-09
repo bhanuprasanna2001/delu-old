@@ -1,4 +1,4 @@
-"""Publish one genuine next-day forecast before the market result is available."""
+"""Publish missing forecasts whenever their inputs become available."""
 
 from __future__ import annotations
 
@@ -19,24 +19,12 @@ from delu.ml.data import prepare_daily_data
 from delu.ml.model import ConformalPriceForecaster
 from delu.ml.tables import merge_delta
 from delu.ml.train import MODEL_NAME, TARGET_COVERAGE
-from delu.pipeline.bronze import BERLIN, SETTLEMENT_CUTOFF
+from delu.pipeline.bronze import BERLIN
 from delu.pipeline.gold import TABLE as GOLD_TABLE
 
 FORECAST_TABLE = "delu.gold.forecasts"
 FORECAST_RUN_TABLE = "delu.gold.forecast_runs"
 LOGGER = logging.getLogger(__name__)
-
-
-def _validate_forecast_time(delivery_date: date, current: datetime) -> None:
-    if current.tzinfo is None or current.utcoffset() is None:
-        raise ValueError("now must be timezone-aware")
-    local = current.astimezone(BERLIN)
-    if delivery_date != local.date() + timedelta(days=1):
-        raise ValueError("Production forecasts are only allowed for tomorrow")
-    if local.time() >= SETTLEMENT_CUTOFF:
-        raise ValueError(
-            "The 15:00 Europe/Berlin production forecast cutoff has passed"
-        )
 
 
 def _drift_values(
@@ -56,10 +44,11 @@ def forecast_day(
     *,
     spark: SparkSession | None = None,
     now: datetime | None = None,
-) -> str:
-    """Forecast tomorrow, failing if inputs are incomplete or the cutoff passed."""
+) -> str | None:
+    """Publish a missing day, or leave it pending until complete inputs arrive."""
     current = datetime.now(UTC) if now is None else now
-    _validate_forecast_time(delivery_date, current)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
 
     spark = (
         spark
@@ -67,12 +56,27 @@ def forecast_day(
         or DatabricksSession.builder.serverless().getOrCreate()
     )
     spark.conf.set("spark.sql.session.timeZone", "UTC")
+    if spark.catalog.tableExists(FORECAST_RUN_TABLE):
+        existing = (
+            spark.table(FORECAST_RUN_TABLE)
+            .where(F.col("delivery_date") == F.lit(delivery_date))
+            .first()
+        )
+        if existing is not None:
+            LOGGER.info("Forecast for %s is already published.", delivery_date)
+            return str(existing.model_version)
+    if not spark.catalog.tableExists(GOLD_TABLE):
+        LOGGER.info("Waiting for model inputs for %s.", delivery_date)
+        return None
     gold = (
         spark.table(GOLD_TABLE)
         .where(F.col("delivery_date") == F.lit(delivery_date))
         .orderBy("quarter_of_day")
         .toPandas()
     )
+    if len(gold) < 96:
+        LOGGER.info("Waiting for complete model inputs for %s.", delivery_date)
+        return None
     daily = prepare_daily_data(gold, require_targets=False)
     if len(daily) != 1 or daily.dates[0] != delivery_date:
         raise ValueError(f"Gold does not contain one complete day for {delivery_date}")
@@ -90,7 +94,6 @@ def forecast_day(
         model, daily.features, prediction[:, 0]
     )
     published_at = current if now is not None else datetime.now(UTC)
-    _validate_forecast_time(delivery_date, published_at)
     predicted_at = published_at.astimezone(UTC).replace(tzinfo=None)
     sorted_gold = gold.sort_values("quarter_of_day")
     forecast = pd.DataFrame(
@@ -139,22 +142,64 @@ def forecast_day(
     return version.version
 
 
+def forecast_pending(
+    spark: SparkSession,
+    *,
+    start: date | None = None,
+    end: date | None = None,
+) -> None:
+    """Fill missing days from the beginning of published forecast history."""
+    end = end or datetime.now(UTC).astimezone(BERLIN).date() + timedelta(days=1)
+    if not spark.catalog.tableExists(GOLD_TABLE):
+        LOGGER.info("Waiting for model inputs.")
+        return
+    ready = (
+        spark.table(GOLD_TABLE)
+        .groupBy("delivery_date")
+        .count()
+        .where(F.col("count") == 96)
+        .select("delivery_date")
+    )
+    if spark.catalog.tableExists(FORECAST_RUN_TABLE):
+        published = spark.table(FORECAST_RUN_TABLE).select("delivery_date")
+        first = published.agg(F.min("delivery_date").alias("day")).first()
+        start = start or (first.day if first is not None else None)
+        ready = ready.join(published, "delivery_date", "left_anti")
+    if start is None:
+        mlflow.set_registry_uri("databricks-uc")
+        version = MlflowClient().get_model_version_by_alias(MODEL_NAME, "prod")
+        start = (
+            datetime.fromtimestamp(version.creation_timestamp / 1000, UTC)
+            .astimezone(BERLIN)
+            .date()
+        )
+    if start > end:
+        raise ValueError("forecast start cannot be after end")
+    for row in (
+        ready.where(F.col("delivery_date").between(start, end))
+        .orderBy("delivery_date")
+        .collect()
+    ):
+        forecast_day(row.delivery_date, spark=spark)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    dates = parser.add_mutually_exclusive_group()
-    dates.add_argument("--delivery-date", type=date.fromisoformat)
-    dates.add_argument(
-        "--run-date",
-        type=date.fromisoformat,
-        help="Date the scheduled job started, used to make retries deterministic",
-    )
+    parser.add_argument("--delivery-date", type=date.fromisoformat)
+    parser.add_argument("--start", help="First delivery date to backfill")
+    parser.add_argument("--end", help="Last delivery date; defaults to tomorrow")
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    current = datetime.now(UTC)
-    run_date = args.run_date or current.astimezone(BERLIN).date()
-    forecast_day(args.delivery_date or run_date + timedelta(days=1), now=current)
+    if args.delivery_date is not None:
+        forecast_day(args.delivery_date)
+        return
+    forecast_pending(
+        DatabricksSession.builder.serverless().getOrCreate(),
+        start=date.fromisoformat(args.start) if args.start else None,
+        end=date.fromisoformat(args.end) if args.end else None,
+    )
 
 
 if __name__ == "__main__":

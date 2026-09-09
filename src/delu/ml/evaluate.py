@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import mlflow
 import pandas as pd
 from databricks.connect import DatabricksSession
 from mlflow import MlflowClient
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 from delu.ml.metrics import forecast_metrics
@@ -18,29 +18,11 @@ from delu.ml.monitoring import assess_drift
 from delu.ml.predict import FORECAST_RUN_TABLE, FORECAST_TABLE
 from delu.ml.tables import merge_delta
 from delu.ml.train import MODEL_NAME, TARGET_COVERAGE
-from delu.pipeline.bronze import BERLIN, SETTLEMENT_CUTOFF, latest_settlement_date
+from delu.pipeline.bronze import BERLIN, DEFAULT_START
 from delu.pipeline.gold import TABLE as GOLD_TABLE
 
 METRICS_TABLE = "delu.gold.forecast_metrics"
 LOGGER = logging.getLogger(__name__)
-
-
-def _on_time_forecasts(frame: DataFrame) -> DataFrame:
-    predicted_local = F.from_utc_timestamp("predicted_at", "Europe/Berlin")
-    return frame.where(
-        (F.to_date(predicted_local) == F.date_sub("delivery_date", 1))
-        & (F.hour(predicted_local) < SETTLEMENT_CUTOFF.hour)
-    )
-
-
-def _forecast_is_on_time(delivery_date: date, predicted_at: datetime) -> bool:
-    if predicted_at.tzinfo is None or predicted_at.utcoffset() is None:
-        predicted_at = predicted_at.replace(tzinfo=UTC)
-    predicted_local = predicted_at.astimezone(BERLIN)
-    return (
-        predicted_local.date() == delivery_date - date.resolution
-        and predicted_local.time() < SETTLEMENT_CUTOFF
-    )
 
 
 def _evaluation_dates(
@@ -50,6 +32,11 @@ def _evaluation_dates(
     end: date,
 ) -> tuple[date, ...]:
     spark.conf.set("spark.sql.session.timeZone", "UTC")
+    if not all(
+        spark.catalog.tableExists(table) for table in (FORECAST_TABLE, GOLD_TABLE)
+    ):
+        LOGGER.info("Waiting for forecasts and actual prices.")
+        return ()
     forecast = (
         spark.table(FORECAST_TABLE)
         .where(F.col("delivery_date").between(F.lit(start), F.lit(end)))
@@ -68,16 +55,24 @@ def _evaluation_dates(
         .select("delivery_date")
     )
     eligible = forecast.join(actual, "delivery_date", "inner")
+    pending = eligible
     if spark.catalog.tableExists(METRICS_TABLE):
-        eligible = eligible.join(
+        pending = eligible.join(
             spark.table(METRICS_TABLE)
-            .where(F.col("monitoring_status") != "pending")
+            .where(~F.col("monitoring_status").isin("pending", "late"))
             .select("delivery_date"),
             "delivery_date",
             "left_anti",
         )
+    first = pending.agg(F.min("delivery_date").alias("day")).first()
+    if first is None or first.day is None:
+        return ()
+    # Recompute subsequent rolling metrics when an older gap has been filled.
     return tuple(
-        row.delivery_date for row in eligible.orderBy("delivery_date").collect()
+        row.delivery_date
+        for row in eligible.where(F.col("delivery_date") >= F.lit(first.day))
+        .orderBy("delivery_date")
+        .collect()
     )
 
 
@@ -85,15 +80,19 @@ def evaluate_day(
     delivery_date: date,
     *,
     spark: SparkSession | None = None,
-    fail_on_drift: bool = True,
-) -> dict[str, float]:
-    """Join forecast to truth, persist metrics, and alert on material drift."""
+) -> dict[str, float] | None:
+    """Evaluate available prices and record monitoring without blocking data work."""
     spark = (
         spark
         or SparkSession.getActiveSession()
         or DatabricksSession.builder.serverless().getOrCreate()
     )
     spark.conf.set("spark.sql.session.timeZone", "UTC")
+    if not all(
+        spark.catalog.tableExists(table) for table in (FORECAST_TABLE, GOLD_TABLE)
+    ):
+        LOGGER.info("Waiting for forecasts and actual prices for %s.", delivery_date)
+        return None
     forecast = spark.table(FORECAST_TABLE).where(
         F.col("delivery_date") == F.lit(delivery_date)
     )
@@ -118,9 +117,14 @@ def evaluate_day(
         .orderBy("quarter_of_day")
         .toPandas()
     )
-    if len(joined) != 96 or joined.isna().to_numpy().any():
+    if len(joined) < 96 or joined.isna().to_numpy().any():
+        LOGGER.info(
+            "Waiting for complete forecasts and actual prices for %s.", delivery_date
+        )
+        return None
+    if len(joined) != 96 or joined["quarter_of_day"].tolist() != list(range(96)):
         raise ValueError(
-            f"Expected 96 complete forecast and target rows for {delivery_date}"
+            f"Invalid forecast and target quarter grid for {delivery_date}"
         )
     versions = joined["model_version"].astype("string").unique()
     if len(versions) != 1:
@@ -129,11 +133,6 @@ def evaluate_day(
     predicted_at = joined["predicted_at"].unique()
     if len(predicted_at) != 1:
         raise ValueError("Forecast rows contain multiple prediction timestamps")
-    prediction_time = pd.Timestamp(predicted_at[0]).to_pydatetime()
-    if not isinstance(prediction_time, datetime):
-        raise ValueError("Forecast rows contain an invalid prediction timestamp")
-    on_time = _forecast_is_on_time(delivery_date, prediction_time)
-
     metrics = forecast_metrics(
         joined["price_de_lu_sdac_eur_per_mwh"],
         joined["predicted_price_eur_per_mwh"],
@@ -174,14 +173,6 @@ def evaluate_day(
             .where(F.col("delivery_date") < F.lit(delivery_date))
             .where(F.col("monitoring_status") != "pending")
         )
-        if on_time:
-            prior = prior.join(
-                _on_time_forecasts(spark.table(FORECAST_RUN_TABLE)).select(
-                    "delivery_date"
-                ),
-                "delivery_date",
-                "inner",
-            )
         prior_history = (
             prior.select(*history_columns).orderBy("delivery_date").toPandas()
         )
@@ -207,19 +198,10 @@ def evaluate_day(
         reference_mae=reference_mae,
         target_coverage=TARGET_COVERAGE,
     )
-    monitoring_status = monitoring.status if on_time else "late"
-    monitoring_reasons = (
-        monitoring.reasons
-        if on_time
-        else (
-            "forecast created outside the D-1 15:00 production cutoff; "
-            "excluded from on-time monitoring",
-        )
-    )
     metric_row.update(
         {
-            "monitoring_status": monitoring_status,
-            "monitoring_reasons": "; ".join(monitoring_reasons),
+            "monitoring_status": monitoring.status,
+            "monitoring_reasons": "; ".join(monitoring.reasons),
             "rolling_7d_mae": monitoring.rolling_7d_mae,
             "rolling_7d_baseline_exaa_mae": (monitoring.rolling_7d_baseline_exaa_mae),
             "rolling_28d_picp": monitoring.rolling_28d_picp,
@@ -232,46 +214,37 @@ def evaluate_day(
         keys=("delivery_date",),
     )
     LOGGER.info("Evaluated %s: %s", delivery_date, metrics)
-    if on_time and monitoring.reasons:
+    if monitoring.reasons:
         message = "; ".join(monitoring.reasons)
-        LOGGER.error("Forecast monitoring alert for %s: %s", delivery_date, message)
-        if fail_on_drift:
-            raise RuntimeError(message)
+        LOGGER.warning("Forecast monitoring alert for %s: %s", delivery_date, message)
     return metrics
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--delivery-date", type=date.fromisoformat)
-    parser.add_argument("--start", type=date.fromisoformat)
-    parser.add_argument("--end", type=date.fromisoformat)
-    parser.add_argument("--no-fail-on-drift", action="store_true")
+    parser.add_argument("--start")
+    parser.add_argument("--end")
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     if args.delivery_date is not None:
-        evaluate_day(args.delivery_date, fail_on_drift=not args.no_fail_on_drift)
+        evaluate_day(args.delivery_date)
         return
 
     now = datetime.now(UTC)
-    end = args.end or latest_settlement_date(now)
-    start = args.start or (end.replace(day=1) - date.resolution).replace(day=1)
+    end = (
+        date.fromisoformat(args.end)
+        if args.end
+        else now.astimezone(BERLIN).date() + timedelta(days=1)
+    )
+    start = date.fromisoformat(args.start) if args.start else DEFAULT_START
     if start > end:
         raise ValueError("evaluation start cannot be after end")
     spark = DatabricksSession.builder.serverless().getOrCreate()
-    failures: list[str] = []
     for delivery_date in _evaluation_dates(spark, start=start, end=end):
-        try:
-            evaluate_day(
-                delivery_date,
-                spark=spark,
-                fail_on_drift=not args.no_fail_on_drift,
-            )
-        except RuntimeError as exc:
-            failures.append(f"{delivery_date}: {exc}")
-    if failures:
-        raise RuntimeError("; ".join(failures))
+        evaluate_day(delivery_date, spark=spark)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ from unittest.mock import Mock
 from delu.pipeline import gold
 
 
-def test_cli_accepts_forwarded_recovery_parameters(monkeypatch) -> None:
+def test_cli_accepts_forwarded_backfill_parameters(monkeypatch) -> None:
     build = Mock()
     monkeypatch.setattr(gold, "build", build)
     monkeypatch.setattr(

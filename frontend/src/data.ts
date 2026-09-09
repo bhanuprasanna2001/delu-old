@@ -140,15 +140,3 @@ export function dayStatus(day: DateSummary) {
   if (!day.has_forecast) return { label: 'Historical observation', tone: 'neutral' }
   return day.settled ? { label: 'Settled', tone: 'settled' } : { label: 'Forecast only', tone: 'pending' }
 }
-
-export function forecastIsLate(day: Pick<DateSummary, 'predicted_at' | 'delivery_date'>): boolean {
-  if (!day.predicted_at) return false
-  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', hourCycle: 'h23',
-  }).formatToParts(new Date(day.predicted_at)).map(part => [part.type, part.value]))
-  const forecastDay = new Date(`${day.delivery_date}T12:00:00Z`)
-  forecastDay.setUTCDate(forecastDay.getUTCDate() - 1)
-  const publishedDay = `${parts.year}-${parts.month}-${parts.day}`
-  return publishedDay !== forecastDay.toISOString().slice(0, 10) || Number(parts.hour) >= 15
-}

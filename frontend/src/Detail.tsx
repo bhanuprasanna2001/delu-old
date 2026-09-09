@@ -2,7 +2,7 @@ import { ChevronLeft, ChevronRight, Clock3, Database, PackageCheck } from 'lucid
 import { useState } from 'react'
 import useSWR from 'swr'
 import Chart, { colors } from './Chart'
-import { fetchData, forecastIsLate, formatDate, formatNumber, formatTimestamp, modelSchema, percent, timeRange, weatherSchema } from './data'
+import { fetchData, formatDate, formatNumber, formatTimestamp, modelSchema, percent, timeRange, weatherSchema } from './data'
 import type { DateSummary, Feature, Features, Forecast, Metrics, PricePoint, Weather, WeatherQuarter } from './data'
 import { DataError, DownloadButton, Loading, SectionHeading } from './ui'
 
@@ -30,8 +30,7 @@ export default function Detail({ day, forecast, points, features, featuresError,
   const metrics = forecast?.metrics
   return <div className="detail-sections">
     <section aria-label="Forecast performance">
-      <SectionHeading number="01" title="Forecast performance"><span className="section-context">{metrics ? `Evaluated ${formatTimestamp(metrics.evaluated_at)}` : 'Settlement from 15:00 · Europe/Berlin'}</span></SectionHeading>
-      {forecastIsLate(forecast ?? day) ? <p className="section-description">This forecast was published outside the day-ahead cutoff. Its metrics are shown for research and excluded from on-time monitoring.</p> : null}
+      <SectionHeading number="01" title="Forecast performance"><span className="section-context">{metrics ? `Evaluated ${formatTimestamp(metrics.evaluated_at)}` : 'Waiting for data'}</span></SectionHeading>
       {metrics ? <>
         <div className="metrics-grid">{metricDefinitions.map(item => <div className="metric" key={item.key} title={item.note}>
           <span className="metric-label">{item.label}</span><div className="metric-value">{item.percent ? percent(metrics[item.key]) : formatNumber(metrics[item.key])}</div>
@@ -42,12 +41,12 @@ export default function Detail({ day, forecast, points, features, featuresError,
           <p className="mt-2">Monitoring: {metrics.monitoring_status}{metrics.monitoring_reasons.length ? ` · ${metrics.monitoring_reasons.join(' · ')}` : ''}</p>
         </details>
         {metrics.monitoring_reasons.length ? <p aria-live="polite" className="inline-note text-warning">Model monitoring: {metrics.monitoring_reasons.join(' · ')}</p> : null}
-      </> : <div className="settlement-notice"><Clock3 size={20} className="shrink-0 text-muted" /><div><h3>{!day.has_forecast ? 'An observation, before forecast history began.' : day.settled ? 'Prices are settled. Evaluation is pending.' : 'A forecast now. A complete picture after settlement.'}</h3><p>{!day.has_forecast ? 'Market prices and Gold inputs are available for this day. No production forecast was stored, so model performance is not calculated.' : 'The 11:30 job publishes the forecast. The settlement job starts at 15:00 Berlin time; actual prices and metrics appear when the data is available and evaluation finishes.'}</p></div></div>}
+      </> : <div className="settlement-notice"><Clock3 size={20} className="shrink-0 text-muted" /><div><h3>{!day.has_forecast ? 'No forecast has been published for this day.' : day.settled ? 'Prices are settled. Evaluation is pending.' : 'Waiting for actual prices.'}</h3><p>{!day.has_forecast ? 'Market prices and inputs are available. Performance metrics appear when a forecast and actual prices are both available.' : 'The pipeline checks again automatically. Actual prices and evaluation results appear as the data becomes available.'}</p></div></div>}
     </section>
 
     <section aria-label="Daily data">
       <SectionHeading number="02" title={day.has_forecast ? 'Behind the forecast' : 'Market data & inputs'}><span className="section-context">{features ? '96 quarters · Gold dataset' : 'Gold dataset'}</span></SectionHeading>
-      <p className="section-description">{day.has_forecast ? 'The prices and cutoff-safe inputs used for this delivery day.' : 'Historical market prices and the inputs available for this delivery day.'} Units are shown in the table headings.</p>
+      <p className="section-description">{day.has_forecast ? 'The prices and model inputs for this delivery day.' : 'Historical market prices and the inputs available for this delivery day.'} Units are shown in the table headings.</p>
       {featuresError && !features ? <DataError error={featuresError} retry={retryFeatures} /> : !features ? <Loading>Loading the daily inputs</Loading> : <InputTable features={features} points={points} weather={weather.data} />}
     </section>
 
@@ -84,7 +83,7 @@ export default function Detail({ day, forecast, points, features, featuresError,
 
     <section aria-label="Weather plots">
       <SectionHeading number="05" title="Weather outlook"><span className="section-context">{weather.data ? `${weather.data.location_count}-point grid mean · run ${formatDate(weather.data.model_run_date, 'short')}` : 'Open-Meteo · ECMWF IFS'}</span></SectionHeading>
-      <p className="section-description">Cutoff-safe forecasts for the delivery day from the previous 00Z model run. Temperature-only gaps use ECMWF IFS 0.25°; known midnight solar gaps are zero.</p>
+      <p className="section-description">Weather forecasts for the delivery day from the previous 00Z model run.</p>
       {weather.error && !weather.data ? <DataError error={weather.error} retry={() => void weather.mutate()} /> : !weather.data ? <Loading>Loading weather outlook</Loading> : <WeatherPlots weather={weather.data} />}
     </section>
   </div>

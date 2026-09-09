@@ -100,7 +100,8 @@ test('overview, precise tooltip, detail layout, inputs, generation selector and 
   await page.getByRole('button', { name: 'Open detailed view', exact: true }).click()
   await expect(page).toHaveURL(/view=detail/)
   await expect(page.getByRole('heading', { name: 'Forecast performance', exact: true })).toBeVisible()
-  await expect(page.getByText('Its metrics are shown for research and excluded from on-time monitoring.')).toBeVisible()
+  await expect(page.getByText('Published 04 Sept, 15:36 CEST', { exact: true })).toBeVisible()
+  await expect(page.getByText(/cutoff|on-time monitoring|11:30|15:00/)).toHaveCount(0)
   await expect(page.getByText('90.0%', { exact: true }).first()).toBeVisible()
   if (!isMobile) {
     const bounds = await page.locator('.detail-plot-grid').boundingBox()
@@ -141,17 +142,17 @@ test('date arrows expose missing dates and historical observations never acquire
   await page.goto('/')
   await page.getByRole('button', { name: 'Previous day' }).click()
   await expect(page.getByLabel('Delivery date')).toHaveValue('2026-09-04')
-  await expect(page.getByText('There is no complete dataset for this date.')).toBeVisible()
+  await expect(page.getByText('Forecasts and results will appear as the data becomes available.')).toBeVisible()
   await page.getByRole('button', { name: 'Previous day' }).click()
   await expect(page.getByLabel('Delivery date')).toHaveValue('2026-09-03')
   await expect(page.getByText('Historical observation', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'DELU forecast', exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Previous day' })).toBeDisabled()
   await page.getByRole('button', { name: 'Explore this day' }).click()
-  await expect(page.getByText('An observation, before forecast history began.')).toBeVisible()
+  await expect(page.getByText('No forecast has been published for this day.')).toBeVisible()
   await expect(page.getByText('Mean absolute error', { exact: true })).toHaveCount(0)
   await page.getByLabel('Delivery date').fill('2026-09-04')
-  await expect(page.getByText('There is no complete dataset for this date.')).toBeVisible()
+  await expect(page.getByText('Forecasts and results will appear as the data becomes available.')).toBeVisible()
   await page.getByRole('button', { name: 'Go to latest available day' }).click()
   await expect(page.getByLabel('Delivery date')).toHaveValue('2026-09-05')
 })
@@ -163,7 +164,7 @@ test('forecast-only data refreshes into settlement without fabricating truth', a
   await page.goto('/?date=2026-09-05&view=detail')
   await expect(page.getByText('Forecast only', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Actual SDAC', exact: true })).toHaveCount(0)
-  await expect(page.getByText('A forecast now. A complete picture after settlement.')).toBeVisible()
+  await expect(page.getByText('Waiting for actual prices.')).toBeVisible()
   mode.settled = true
   await page.clock.fastForward(61_000)
   await expect(page.getByText('Settled', { exact: true })).toBeVisible()
@@ -185,11 +186,17 @@ test('partial inputs preserve the price forecast and errors can be retried', asy
   await expect(page.getByRole('button', { name: 'EXAA DE-LU', exact: true })).toBeVisible()
 })
 
-test('empty data explains when the first forecast will arrive', async ({ page }) => {
-  await mockApi(page, { empty: true })
+test('waiting data refreshes into a published forecast automatically', async ({ page }) => {
+  const mode = { empty: true }
+  await mockApi(page, mode)
+  await page.clock.install()
   await page.goto('/')
-  await expect(page.getByText('The first forecast will appear after the scheduled 11:30 run.')).toBeVisible()
+  await expect(page.getByText('Forecasts and results will appear as the data becomes available.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'DELU forecast', exact: true })).toHaveCount(0)
+  mode.empty = false
+  await page.clock.runFor(61_000)
+  await expect(page.getByRole('button', { name: 'DELU forecast', exact: true })).toBeVisible()
+  await expect(page.getByText('Waiting for data', { exact: true })).toHaveCount(0)
 })
 
 test('invalid date links fall back to the latest available date', async ({ page }) => {

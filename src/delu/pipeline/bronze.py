@@ -4,12 +4,9 @@ import argparse
 import json
 import logging
 import os
-import random
-import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
-from datetime import time as datetime_time
 from http.client import RemoteDisconnected
 from itertools import batched
 from socket import gaierror
@@ -65,9 +62,8 @@ WEATHER_LOCATIONS = (
     ("baltic_west", 54.50, 11.30, "sea"),
     ("baltic_east", 54.50, 13.50, "sea"),
 )
-WORKERS = 12
+WORKERS = 2
 BATCH_DAYS = 7
-SETTLEMENT_CUTOFF = datetime_time(15)
 PRICE_LAGS = (1, 2, 7)
 RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504, 530, 599})
 LOGGER = logging.getLogger(__name__)
@@ -119,21 +115,6 @@ ALL: tuple[Request, ...] = SDAC + EXAA + FORECAST + ACTUAL
 WEATHER: tuple[Request, ...] = tuple(
     (f"weather.{WEATHER_MODEL}.{cell}", "weather", cell, {}) for cell in ("land", "sea")
 )
-
-
-def _latest_weather_run(now: datetime) -> date:
-    if now.tzinfo is None or now.utcoffset() is None:
-        raise ValueError("now must be timezone-aware")
-    local = now.astimezone(BERLIN)
-    return local.date() - timedelta(days=local.hour < 9)
-
-
-def latest_settlement_date(now: datetime) -> date:
-    """Return the latest delivery date expected to have published SDAC prices."""
-    if now.tzinfo is None or now.utcoffset() is None:
-        raise ValueError("now must be timezone-aware")
-    local = now.astimezone(BERLIN)
-    return local.date() + timedelta(days=local.time() >= SETTLEMENT_CUTOFF)
 
 
 def _weather_parameters(cell: str, run_date: date, model: str) -> dict[str, str]:
@@ -199,59 +180,34 @@ def _fetch_weather(cell: str, run_date: date) -> str:
 
 
 def _planned_requests(
-    mode: str,
     *,
     today: date,
     start: date,
     end: date | None = None,
-    weather_run_date: date | None = None,
-    settlement_date: date | None = None,
 ) -> list[PlannedRequest]:
-    weather_run_date = today if weather_run_date is None else weather_run_date
-    if mode == "morning":
-        delivery_date = today + timedelta(days=1)
-        return [
-            *(
-                (delivery_date - timedelta(days=lag), *request)
-                for lag in PRICE_LAGS
-                for request in SDAC
-            ),
-            *((delivery_date, *request) for request in EXAA),
-            *((today, *request) for request in FORECAST),
-            *((today - timedelta(days=1), *request) for request in ACTUAL),
-            *((weather_run_date, *request) for request in WEATHER),
-        ]
-    if mode == "settlement":
-        settlement_date = (
-            today + timedelta(days=1) if settlement_date is None else settlement_date
+    """Fetch a delivery range and its lagged inputs at any publication time."""
+    if end is not None and start > end:
+        raise ValueError("ingestion start cannot be after end")
+    end = min(end or today + timedelta(days=1), today + timedelta(days=1))
+    if start > end:
+        return []
+    return [
+        (source_start + timedelta(days=offset), *request)
+        for requests_for_source, source_start, source_end in (
+            (SDAC, start - timedelta(days=max(PRICE_LAGS)), end),
+            (EXAA, start, end),
+            (FORECAST + WEATHER, start - timedelta(days=1), end - timedelta(days=1)),
+            (ACTUAL, start - timedelta(days=2), end - timedelta(days=2)),
         )
-        return [(settlement_date, *request) for request in SDAC]
-    if mode == "full":
-        if end is not None and start > end:
-            raise ValueError("ingestion start cannot be after end")
-        final_date = min(end or today - timedelta(days=1), today - timedelta(days=1))
-        if start > final_date:
-            return []
-        return [
-            (start + timedelta(days=offset), *request)
-            for offset in range((final_date - start).days + 1)
-            for request in (*ALL, *WEATHER)
-        ]
-    raise ValueError("mode must be full, morning, or settlement")
-
-
-def _should_retry_immediately(exc: Exception) -> bool:
-    if not isinstance(exc, requests.HTTPError):
-        return True
-    return getattr(exc.response, "status_code", None) in RETRYABLE_HTTP_STATUSES
+        for offset in range((source_end - source_start).days + 1)
+        for request in requests_for_source
+    ]
 
 
 def ingest(
-    mode: str,
     *,
-    start: date = DEFAULT_START,
+    start: date | None = None,
     end: date | None = None,
-    run_date: date | None = None,
     now: datetime | None = None,
     workers: int = WORKERS,
     spark: SparkSession | None = None,
@@ -262,7 +218,7 @@ def ingest(
     current = datetime.now(UTC) if now is None else now
     if current.tzinfo is None or current.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
-    today = run_date or current.astimezone(BERLIN).date()
+    today = current.astimezone(BERLIN).date()
     spark = (
         spark
         or SparkSession.getActiveSession()
@@ -273,18 +229,9 @@ def ingest(
         spark.createDataFrame([], SCHEMA).write.format("delta").saveAsTable(TABLE)
 
     # Each item is (delivery date or run date, series, method, area, method kwargs).
-    planned = _planned_requests(
-        mode,
-        today=today,
-        start=start,
-        end=end,
-        weather_run_date=run_date or _latest_weather_run(current),
-        settlement_date=(
-            run_date + timedelta(days=1)
-            if run_date is not None
-            else latest_settlement_date(current)
-        ),
-    )
+    # The archive starts at DEFAULT_START; its first full feature day needs 7 lags.
+    first_day = start or DEFAULT_START + timedelta(days=max(PRICE_LAGS))
+    planned = _planned_requests(today=today, start=first_day, end=end)
 
     if not planned:
         LOGGER.info("Nothing new to ingest.")
@@ -316,54 +263,52 @@ def ingest(
 
     def fetch(
         request: PlannedRequest,
-    ) -> tuple[date, str, str]:
+    ) -> tuple[date, str, str] | None:
         delivery_date, series, method, area, params = request
         period_start = pd.Timestamp(delivery_date, tz=BERLIN)
         period_end = pd.Timestamp(delivery_date + timedelta(days=1), tz=BERLIN)
 
-        for attempt in range(4):
-            try:
-                if method == "weather":
-                    payload = _fetch_weather(area, delivery_date)
-                else:
-                    if api_key is None:
-                        raise RuntimeError("ENTSO-E API key is unavailable")
-                    client = EntsoeRawClient(
-                        api_key, retry_count=1, retry_delay=0, timeout=60
-                    )
-                    payload = getattr(client, method)(
-                        area, period_start, period_end, **params
-                    )
-                validate_payload(payload, series, delivery_date)
-                return delivery_date, series, payload
-            except NoMatchingDataError as exc:
-                raise RuntimeError(
-                    f"No ENTSO-E data for {series} on {delivery_date}"
-                ) from exc
-            except (
-                requests.ConnectionError,
-                requests.Timeout,
-                requests.HTTPError,
-                gaierror,
-                RemoteDisconnected,
-            ) as exc:
-                if attempt == 3 or not _should_retry_immediately(exc):
-                    raise
-                delay = min(2**attempt, 30) + random.random()
-                LOGGER.warning(
-                    "Retrying %s for %s in %.1fs after %s.",
-                    series,
-                    delivery_date,
-                    delay,
-                    (
-                        f"HTTP {getattr(exc.response, 'status_code', 'error')}"
-                        if isinstance(exc, requests.HTTPError)
-                        else type(exc).__name__
-                    ),
+        try:
+            if method == "weather":
+                payload = _fetch_weather(area, delivery_date)
+            else:
+                if api_key is None:
+                    raise RuntimeError("ENTSO-E API key is unavailable")
+                client = EntsoeRawClient(
+                    api_key, retry_count=1, retry_delay=0, timeout=60
                 )
-                time.sleep(delay)
-
-        raise AssertionError("unreachable")
+                payload = getattr(client, method)(
+                    area, period_start, period_end, **params
+                )
+            validate_payload(payload, series, delivery_date)
+            return delivery_date, series, payload
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            unavailable_run = (
+                method == "weather"
+                and status == 400
+                and exc.response is not None
+                and "The requested model run is not available." in exc.response.text
+            )
+            if status not in RETRYABLE_HTTP_STATUSES | {404} and not unavailable_run:
+                raise
+            reason = f"HTTP {status}"
+        except (
+            NoMatchingDataError,
+            requests.ConnectionError,
+            requests.Timeout,
+            gaierror,
+            RemoteDisconnected,
+            ValueError,
+        ) as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+        LOGGER.warning(
+            "Waiting for data: %s on %s (%s). Will retry on the next run.",
+            series,
+            delivery_date,
+            reason,
+        )
+        return None
 
     written = 0
     failures: list[tuple[date, str, Exception]] = []
@@ -394,7 +339,9 @@ def ingest(
                 rows = []
                 for request, future in futures:
                     try:
-                        rows.append(future.result())
+                        row = future.result()
+                        if row is not None:
+                            rows.append(row)
                     except Exception as exc:
                         failures.append((request[0], request[1], exc))
                         LOGGER.error(
@@ -432,24 +379,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Ingest raw ENTSO-E payloads into delu.bronze.raw"
     )
-    parser.add_argument("mode", choices=("full", "morning", "settlement"))
-    parser.add_argument("--start", type=date.fromisoformat, default=DEFAULT_START)
-    parser.add_argument("--end", type=date.fromisoformat)
-    parser.add_argument(
-        "--run-date",
-        type=date.fromisoformat,
-        help="Date the scheduled job started, used to make retries deterministic",
-    )
+    parser.add_argument("--start", help="First delivery date, including lagged inputs")
+    parser.add_argument("--end", help="Last delivery date; defaults to tomorrow")
     parser.add_argument("--workers", type=int, default=WORKERS)
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     ingest(
-        args.mode,
-        start=args.start,
-        end=args.end,
-        run_date=args.run_date,
+        start=date.fromisoformat(args.start) if args.start else None,
+        end=date.fromisoformat(args.end) if args.end else None,
         workers=args.workers,
     )
 

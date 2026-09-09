@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime
+from functools import partial
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -11,8 +13,6 @@ from pyspark.sql import SparkSession
 
 from delu.pipeline.bronze import (
     ACTUAL,
-    ALL,
-    DEFAULT_START,
     EXAA,
     FORECAST,
     SDAC,
@@ -20,97 +20,47 @@ from delu.pipeline.bronze import (
     WEATHER_FALLBACK_MODEL,
     WEATHER_MODEL,
     _fetch_weather,
-    _latest_weather_run,
     _planned_requests,
-    _should_retry_immediately,
     _weather_parameters,
     ingest,
-    latest_settlement_date,
 )
 
 
-def test_morning_plan_fetches_only_tomorrows_inputs() -> None:
-    today = date(2026, 9, 7)
-
-    planned = _planned_requests("morning", today=today, start=DEFAULT_START)
-
-    fetched = {(delivery_date, series) for delivery_date, series, *_ in planned}
-    expected = {
-        *(
-            (source_date, series)
-            for source_date in (date(2026, 9, 7), date(2026, 9, 6), date(2026, 9, 1))
-            for series, *_ in SDAC
-        ),
-        *((today + date.resolution, series) for series, *_ in EXAA),
-        *((today, series) for series, *_ in FORECAST),
-        *((today - date.resolution, series) for series, *_ in ACTUAL),
-        *((today, series) for series, *_ in WEATHER),
-    }
-    assert fetched == expected
-    assert len(planned) == len(expected)
-
-
-def test_settlement_plan_fetches_only_the_new_result() -> None:
-    today = date(2026, 9, 7)
-
-    planned = _planned_requests("settlement", today=today, start=DEFAULT_START)
-
-    fetched = {(delivery_date, series) for delivery_date, series, *_ in planned}
-    assert fetched == {(date(2026, 9, 8), series) for series, *_ in SDAC}
-
-
-def test_full_plan_uses_the_requested_history_window() -> None:
+def test_backfill_includes_five_missing_days_and_their_lagged_inputs() -> None:
     planned = _planned_requests(
-        "full",
-        today=date(2026, 9, 7),
-        start=date(2026, 9, 2),
-        end=date(2026, 9, 4),
+        today=date(2026, 9, 9),
+        start=date(2026, 9, 4),
+        end=date(2026, 9, 8),
     )
+    requests_by_day = {(day, series) for day, series, *_ in planned}
 
-    fetched = {(delivery_date, series) for delivery_date, series, *_ in planned}
-    assert len(fetched) == 3 * (len(ALL) + len(WEATHER))
-    assert {delivery_date for delivery_date, _ in fetched} == {
-        date(2026, 9, 2),
-        date(2026, 9, 3),
-        date(2026, 9, 4),
-    }
-
-
-def test_full_plan_stops_before_the_incomplete_current_day() -> None:
-    planned = _planned_requests(
-        "full",
-        today=date(2026, 9, 7),
-        start=date(2026, 9, 6),
-        end=date(2026, 9, 7),
-    )
-
-    assert {delivery_date for delivery_date, *_ in planned} == {date(2026, 9, 6)}
+    assert (date(2026, 9, 4), "de_lu.price.exaa") in requests_by_day
+    assert (date(2026, 9, 8), "de_lu.price.exaa") in requests_by_day
+    assert (date(2026, 8, 28), "de_lu.price.sdac") in requests_by_day
+    assert (date(2026, 9, 2), "de_lu.load.actual") in requests_by_day
+    assert (date(2026, 9, 7), "weather.ecmwf_ifs.land") in requests_by_day
+    assert len(planned) == len(requests_by_day)
 
 
-def test_full_plan_rejects_a_reversed_history_window() -> None:
+def test_current_day_plan_requests_prices_and_weather_without_a_time_gate() -> None:
+    today = date(2026, 9, 9)
+    planned = _planned_requests(today=today, start=date(2026, 9, 10))
+    requests_by_day = {(day, series) for day, series, *_ in planned}
+
+    assert {
+        (date(2026, 9, 10), series) for series, *_ in SDAC + EXAA
+    } <= requests_by_day
+    assert {(today, series) for series, *_ in FORECAST + WEATHER} <= requests_by_day
+    assert {(date(2026, 9, 8), series) for series, *_ in ACTUAL} <= requests_by_day
+
+
+def test_backfill_rejects_a_reversed_range() -> None:
     with pytest.raises(ValueError, match="start cannot be after end"):
         _planned_requests(
-            "full",
-            today=date(2026, 9, 7),
-            start=date(2026, 9, 4),
-            end=date(2026, 9, 3),
+            today=date(2026, 9, 9),
+            start=date(2026, 9, 8),
+            end=date(2026, 9, 4),
         )
-
-
-def test_settlement_date_does_not_roll_forward_before_afternoon() -> None:
-    before = datetime(2026, 9, 8, 12, 59, tzinfo=UTC)
-    cutoff = datetime(2026, 9, 8, 13, 0, tzinfo=UTC)
-
-    assert latest_settlement_date(before) == date(2026, 9, 8)
-    assert latest_settlement_date(cutoff) == date(2026, 9, 9)
-
-
-def test_weather_waits_until_nine_in_berlin() -> None:
-    before = datetime(2026, 9, 8, 6, 59, tzinfo=UTC)
-    cutoff = datetime(2026, 9, 8, 7, 0, tzinfo=UTC)
-
-    assert _latest_weather_run(before) == date(2026, 9, 7)
-    assert _latest_weather_run(cutoff) == date(2026, 9, 8)
 
 
 def _response(payload: object) -> Mock:
@@ -173,76 +123,106 @@ def test_weather_parameters_request_one_model_at_a_time() -> None:
     assert fallback["hourly"] == "temperature_2m"
 
 
-@pytest.mark.parametrize(
-    ("status", "expected"),
-    [
-        pytest.param(530, True, id="entsoe-530"),
-        pytest.param(599, True, id="entsoe-599"),
-        pytest.param(400, False, id="bad-request"),
-        pytest.param(404, False, id="not-found"),
-    ],
-)
-def test_only_transient_http_errors_are_retried_immediately(
-    status: int, expected: bool
-) -> None:
-    response = Mock(spec=requests.Response)
-    response.status_code = status
-
-    assert _should_retry_immediately(requests.HTTPError(response=response)) is expected
+PAYLOAD = """<Publication_MarketDocument><TimeSeries>
+  <currency_Unit.name>EUR</currency_Unit.name>
+  <price_Measure_Unit.name>MWH</price_Measure_Unit.name><curveType>A03</curveType>
+  <Period><timeInterval><start>2026-09-07T22:00Z</start><end>2026-09-08T22:00Z</end></timeInterval>
+  <resolution>PT15M</resolution>
+  <Point><position>1</position><price.amount>50</price.amount></Point>
+  </Period></TimeSeries></Publication_MarketDocument>"""
 
 
-def test_ingestion_persists_successes_before_reporting_other_failures(
-    monkeypatch,
-) -> None:
-    payload = """<Publication_MarketDocument>
-      <TimeSeries>
-        <currency_Unit.name>EUR</currency_Unit.name>
-        <price_Measure_Unit.name>MWH</price_Measure_Unit.name>
-        <curveType>A03</curveType>
-        <Period>
-          <timeInterval>
-            <start>2026-09-07T22:00Z</start>
-            <end>2026-09-08T22:00Z</end>
-          </timeInterval>
-          <resolution>PT15M</resolution>
-          <Point><position>1</position><price.amount>50</price.amount></Point>
-        </Period>
-      </TimeSeries>
-    </Publication_MarketDocument>"""
-
-    def query_prices(area, *_args, **_kwargs):
-        if area == "AT":
-            raise NoMatchingDataError
-        return payload
-
-    client = MagicMock()
-    client.query_day_ahead_prices.side_effect = query_prices
-    monkeypatch.setattr(
-        "delu.pipeline.bronze.EntsoeRawClient", Mock(return_value=client)
-    )
-    monkeypatch.setenv("ENTSOE_API_KEY", "test-key")
-
+@pytest.fixture
+def ingestion(monkeypatch):
+    day = date(2026, 9, 8)
+    missing = {(day, "de_lu.price.sdac"), (day, "at.price.sdac")}
+    stored = {
+        (source_day, series)
+        for source_day, series, *_ in _planned_requests(today=day, start=day, end=day)
+    } - missing
     existing = MagicMock()
     existing.where.return_value = existing
     existing.select.return_value = existing
     existing.distinct.return_value = existing
-    existing.collect.return_value = []
+    existing.collect.side_effect = lambda: [
+        SimpleNamespace(delivery_date=day, series=series) for day, series in stored
+    ]
     update = MagicMock()
     spark = MagicMock(spec=SparkSession)
     spark.catalog.tableExists.return_value = True
     spark.table.return_value = existing
     spark.createDataFrame.return_value = update
+    update.write.format.return_value.mode.return_value.saveAsTable.side_effect = (
+        lambda _table: stored.update(
+            (row[0], row[1]) for row in spark.createDataFrame.call_args.args[0]
+        )
+    )
+    client = MagicMock()
+    monkeypatch.setattr(
+        "delu.pipeline.bronze.EntsoeRawClient", Mock(return_value=client)
+    )
+    monkeypatch.setenv("ENTSOE_API_KEY", "test-key")
+    return spark, client, stored
+
+
+def test_missing_response_is_retried_later_without_refetching_successes(
+    ingestion, caplog
+) -> None:
+    spark, client, stored = ingestion
+    client.query_day_ahead_prices.side_effect = [PAYLOAD, NoMatchingDataError()]
+    run = partial(
+        ingest, start=date(2026, 9, 8), end=date(2026, 9, 8), spark=spark, workers=1
+    )
+
+    assert run(now=datetime(2026, 9, 8, 13, 36, tzinfo=UTC)) == 1
+    assert "Waiting for data" in caplog.text
+    assert (date(2026, 9, 8), "at.price.sdac") not in stored
+
+    client.query_day_ahead_prices.reset_mock(side_effect=True)
+    client.query_day_ahead_prices.return_value = PAYLOAD
+    assert run(now=datetime(2026, 9, 13, 18, tzinfo=UTC)) == 1
+    assert client.query_day_ahead_prices.call_args.args[0] == "AT"
+    assert run(now=datetime(2026, 9, 13, 19, tzinfo=UTC)) == 0
+    client.query_day_ahead_prices.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [429, 503, 530, 599, 404])
+def test_upstream_http_outages_leave_missing_data_pending(ingestion, status) -> None:
+    spark, client, stored = ingestion
+    response = Mock(spec=requests.Response, status_code=status)
+    client.query_day_ahead_prices.side_effect = requests.HTTPError(response=response)
+
+    assert ingest(start=date(2026, 9, 8), end=date(2026, 9, 8), spark=spark) == 0
+    assert (date(2026, 9, 8), "de_lu.price.sdac") not in stored
+
+
+def test_authentication_failure_remains_an_error_after_successes_are_saved(
+    ingestion,
+) -> None:
+    spark, client, stored = ingestion
+    response = Mock(spec=requests.Response, status_code=401)
+    client.query_day_ahead_prices.side_effect = [
+        PAYLOAD,
+        requests.HTTPError(response=response),
+    ]
 
     with pytest.raises(RuntimeError, match="1 source response"):
-        ingest(
-            "settlement",
-            run_date=date(2026, 9, 7),
-            now=datetime(2026, 9, 7, 13, 0, tzinfo=UTC),
-            workers=2,
-            spark=spark,
-        )
+        ingest(start=date(2026, 9, 8), end=date(2026, 9, 8), workers=1, spark=spark)
+    assert (date(2026, 9, 8), "de_lu.price.sdac") in stored
 
-    rows = spark.createDataFrame.call_args.args[0]
-    assert len(rows) == 1
-    assert rows[0][1] == "de_lu.price.sdac"
-    update.write.format.assert_called_once_with("delta")
+
+def test_unpublished_weather_run_stays_pending(ingestion, monkeypatch, caplog) -> None:
+    spark, _client, stored = ingestion
+    stored.add((date(2026, 9, 8), "de_lu.price.sdac"))
+    stored.add((date(2026, 9, 8), "at.price.sdac"))
+    stored.remove((date(2026, 9, 7), "weather.ecmwf_ifs.land"))
+    response = Mock(spec=requests.Response, status_code=400)
+    response.text = '{"reason":"The requested model run is not available."}'
+    response.raise_for_status.side_effect = requests.HTTPError(response=response)
+    monkeypatch.setattr(
+        "delu.pipeline.bronze.requests.get", Mock(return_value=response)
+    )
+
+    assert ingest(start=date(2026, 9, 8), end=date(2026, 9, 8), spark=spark) == 0
+    assert "Waiting for data" in caplog.text
+    assert (date(2026, 9, 7), "weather.ecmwf_ifs.land") not in stored

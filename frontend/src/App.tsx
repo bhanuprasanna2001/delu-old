@@ -2,7 +2,7 @@ import { ArrowDownRight, ArrowLeft, ArrowUpRight } from 'lucide-react'
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import useSWR from 'swr'
 import Chart, { colors } from './Chart'
-import { dateSchema, datesSchema, fetchData, featuresSchema, forecastIsLate, forecastSchema, formatDate, formatTimestamp, observationsSchema, percent, pricePoints, todayBerlin } from './data'
+import { dateSchema, datesSchema, fetchData, featuresSchema, forecastSchema, formatDate, formatTimestamp, observationsSchema, percent, pricePoints } from './data'
 import type { DateSummary } from './data'
 import { DataError, DatePicker, GitHubLink, Loading, Status } from './ui'
 
@@ -40,7 +40,7 @@ export default function App() {
   const error = dates.error && !dates.data
   const content = error ? <DataError error={dates.error} retry={() => void dates.mutate()} />
     : !dates.data ? <Loading />
-      : !selectedDay ? <div className="data-state"><span className="eyebrow">No published data</span><p>{dates.data.length ? 'There is no complete dataset for this date.' : 'The first forecast will appear after the scheduled 11:30 run.'}</p>{defaultDate ? <button type="button" className="secondary-button" onClick={() => navigate(defaultDate)}>Go to latest available day</button> : null}</div>
+      : !selectedDay ? <div className="data-state"><span className="eyebrow">Waiting for data</span><p>Forecasts and results will appear as the data becomes available.</p>{defaultDate ? <button type="button" className="secondary-button" onClick={() => navigate(defaultDate)}>Go to latest available day</button> : null}</div>
         : <DayView key={selectedDay.delivery_date} day={selectedDay} detail={location.detail} onExpand={() => navigate(selectedDay.delivery_date, true)} />
 
   if (location.detail) return <main className="detail-page">
@@ -73,7 +73,6 @@ function DayView({ day, detail, onExpand }: { day: DateSummary; detail: boolean;
   const result = day.has_forecast ? forecast : observations
   const points = useMemo(() => result.data ? pricePoints(result.data, features.data) : [], [result.data, features.data])
   const actualDay = forecast.data ? { ...day, settled: forecast.data.settled } : day
-  const stale = date < todayBerlin()
   const series = [
     { key: 'interval', label: `${percent(forecast.data?.nominal_coverage ?? 0.9).replace('.0%', '%')} prediction interval`, color: colors.forecast, style: 'band' as const },
     { key: 'exaa', label: 'EXAA DE-LU', color: colors.exaa, style: 'dashed' as const },
@@ -88,15 +87,14 @@ function DayView({ day, detail, onExpand }: { day: DateSummary; detail: boolean;
     </div>
     {result.error && !result.data ? <DataError error={result.error} retry={() => void result.mutate()} /> : !result.data ? <Loading /> : <Chart points={points} series={series} unit="EUR / MWh" label={`Electricity prices for ${date}`} onInspect={!detail ? onExpand : undefined} />}
     <div className="price-panel-footer">
-      <span>{!day.has_forecast ? 'Observed prices · No stored model forecast' : forecast.data ? `Published ${formatTimestamp(forecast.data.predicted_at)}` : 'Forecast 11:30 · Settlement from 15:00'}</span>
+      <span>{!day.has_forecast ? 'Observed prices · No stored model forecast' : forecast.data ? `Published ${formatTimestamp(forecast.data.predicted_at)}` : 'Loading publication time'}</span>
       {detail ? <span>Europe/Berlin</span> : <button type="button" className="explore-button" onClick={onExpand} onPointerEnter={() => void import('./Detail')}>Explore this day <ArrowDownRight size={13} /></button>}
     </div>
-    {forecastIsLate(forecast.data ?? day) ? <p className="inline-note">Published outside the day-ahead cutoff. Evaluated for research, excluded from on-time monitoring.</p> : null}
     {features.error && !features.data && day.has_forecast ? <div className="inline-note" aria-live="polite">EXAA inputs are unavailable. <button onClick={() => void features.mutate()} className="underline underline-offset-2">Retry inputs</button></div> : null}
     {result.error && result.data ? <div className="inline-note" aria-live="polite">Showing the last loaded data. Refresh failed. <button onClick={() => void result.mutate()} className="underline underline-offset-2">Retry</button></div> : null}
   </section>
 
-  if (!detail) return <>{chart}{stale ? <p className="overview-note">Viewing {formatDate(date, 'short')} · Forecasts at 11:30, settlement from 15:00 Berlin time</p> : <p className="overview-note">Forecasts at 11:30 · Settlement from 15:00 · Europe/Berlin</p>}</>
+  if (!detail) return <>{chart}<p className="overview-note">Forecasts and results update as data becomes available · Europe/Berlin</p></>
   return <>
     <div className="detail-plot-grid">{chart}<div aria-hidden="true" /></div>
     <Suspense fallback={<Loading>Loading the daily details</Loading>}>
