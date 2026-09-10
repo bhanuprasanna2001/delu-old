@@ -64,10 +64,10 @@ rebuild the downstream state.
 
 ## Processing and retries
 
-The single `data_pipeline` job runs at 02:30, 10:30, 11:30, and 13:30 in
+The single `data_pipeline` job runs at 02:30, 10:30, 11:30, 13:30, and 15:30 in
 Europe/Berlin, with one active run and native Databricks queueing enabled. These
-four starts cover overnight delays, forecast publication, a pre-settlement retry,
-and settlement work. This is a 92% reduction from 48 starts per day. Both scheduled
+five starts cover overnight delays, forecast publication, pre-settlement retries,
+and settlement work. This is a 90% reduction from 48 starts per day. Both scheduled
 jobs use the Databricks `STANDARD` performance target for cost-efficient serverless
 execution. The task graph, task retries, and backfill behavior are unchanged.
 

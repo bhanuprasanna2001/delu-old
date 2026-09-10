@@ -59,7 +59,7 @@ credentials kept on the server.
 
 | Scheduled job | Frequency | What it does |
 | :--- | :--- | :--- |
-| Data pipeline | 02:30, 10:30, 11:30, and 13:30 Europe/Berlin | Fetches missing data, builds complete days, publishes missing forecasts, and evaluates available actual prices. |
+| Data pipeline | 02:30, 10:30, 11:30, 13:30, and 15:30 Europe/Berlin | Fetches missing data, builds complete days, publishes missing forecasts, and evaluates available actual prices. |
 | Retraining | Monthly, day 3 at 06:00 Europe/Berlin | Evaluates a candidate model and promotes it if the quality checks pass. |
 
 Missing data stays pending. Each run retries the missing source responses across

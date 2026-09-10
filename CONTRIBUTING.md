@@ -222,7 +222,7 @@ With labeled Gold history available, `databricks bundle run -t prod monthly_trai
 trains and evaluates the initial model. A candidate must pass promotion checks to
 become `@prod` before scheduled forecasting can use it.
 
-The `data_pipeline` job runs at 02:30, 10:30, 11:30, and 13:30 Europe/Berlin in
+The `data_pipeline` job runs at 02:30, 10:30, 11:30, 13:30, and 15:30 Europe/Berlin in
 cost-efficient `STANDARD` performance mode. It fetches missing source responses,
 rebuilds complete Silver and Gold data, fills missing forecasts, and evaluates
 available actual prices. Missing or temporarily unavailable data stays pending for
