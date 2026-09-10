@@ -65,7 +65,7 @@ def evaluation(monkeypatch):
         datetime(2026, 9, 4, 13, 36, tzinfo=UTC),
         datetime(2026, 9, 10, 18, tzinfo=UTC),
     ],
-    ids=["after-1500", "five-days-later"],
+    ids=["after-sdac", "five-days-later"],
 )
 def test_delayed_forecast_is_evaluated_and_monitored(evaluation, published_at) -> None:
     spark, joined, _run = evaluation
@@ -78,9 +78,13 @@ def test_delayed_forecast_is_evaluated_and_monitored(evaluation, published_at) -
     saved = spark.createDataFrame.call_args.args[0]
     assert saved.loc[0, "monitoring_status"] == "ok"
     assert saved.loc[0, "monitoring_reasons"] == ""
-    spark.createDataFrame.return_value.write.format.return_value.saveAsTable.assert_called_once_with(
-        METRICS_TABLE
-    )
+    assert pd.isna(saved.loc[0, "rolling_7d_mae"])
+    assert pd.isna(saved.loc[0, "rolling_7d_baseline_exaa_mae"])
+    assert pd.isna(saved.loc[0, "rolling_28d_picp"])
+    updates = spark.createDataFrame.return_value
+    for _ in range(3):
+        updates = updates.withColumn.return_value
+    updates.write.format.return_value.saveAsTable.assert_called_once_with(METRICS_TABLE)
 
 
 def test_actual_prices_can_arrive_on_a_later_run(evaluation, caplog) -> None:
@@ -108,7 +112,8 @@ def test_missing_run_metadata_is_reported_without_persisting_metrics(
 
 
 def test_model_drift_is_recorded_without_failing_data_processing(evaluation) -> None:
-    spark, _joined, run = evaluation
+    spark, joined, run = evaluation
+    joined["predicted_at"] = datetime(2026, 9, 4, 9, 30, tzinfo=UTC)
     run.first.return_value = SimpleNamespace(
         data_outlier_rate=0.3, prediction_mean_z=0.0
     )

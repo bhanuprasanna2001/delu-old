@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  Electricity price forecasts for Germany and Luxembourg.<br>
-  Explore each day’s prices, prediction intervals, and market data.
+  EXAA-to-SDAC spread forecasts for Germany and Luxembourg.<br>
+  Explore the expected auction move, uncertainty, and settled result.
 </p>
 
 <p align="center">
@@ -29,11 +29,13 @@
 
 ## The project
 
-DELU forecasts electricity prices at 15-minute intervals for the Germany–Luxembourg
-market. It pairs model predictions with uncertainty intervals, then compares them
-with published Single Day-Ahead Coupling (SDAC) prices when results are available.
+DELU forecasts the 15-minute price spread from the earlier EXAA auction to the
+Germany–Luxembourg Single Day-Ahead Coupling (SDAC) auction. It is a decision aid
+for the interval between the 10:15 EXAA auction and the 12:00 SDAC auction, not a
+generic claim to forecast an unknown price from scratch.
 
-- **Explore a day.** Navigate dates and hover over the chart to inspect each price.
+- **Explore the spread.** Navigate dates and inspect the expected and settled
+  `SDAC - EXAA` move for every quarter hour.
 - **Look closer.** Open the detailed view for forecast inputs, settlement metrics,
   and load and generation charts.
 - **Follow the results.** See actual prices and model performance as they arrive.
@@ -52,26 +54,30 @@ flowchart LR
     D --> A --> W
 ```
 
-Databricks prepares the data, trains the model, and stores forecasts. FastAPI reads
-those results; React displays them in the browser. On Render, the website and API
-run together in one service, with credentials kept on the server.
+Databricks prepares the data, trains the model, and stores forecasts. FastAPI
+caches successful read-only queries and React adds browser-cache reuse. On Render,
+the website and API run together in one service, with credentials kept on the
+server. A recent successful response can still be served during a short SQL
+warehouse outage or daily-quota exhaustion.
 
 | Scheduled job | Frequency | What it does |
 | :--- | :--- | :--- |
-| Data pipeline | Every 30 minutes | Fetches missing data, builds complete days, publishes missing forecasts, and evaluates available actual prices. |
+| Data pipeline | 02:30, 10:30, 11:30, and 13:30 Europe/Berlin | Fetches missing data, builds complete days, publishes missing forecasts, and evaluates available actual prices. This is four runs per day instead of 48. |
 | Retraining | Monthly, day 3 at 06:00 Europe/Berlin | Evaluates a candidate model and promotes it if the quality checks pass. |
 
-Missing data stays pending. Each run retries the missing source responses across
+Missing data stays pending. Each run retries missing source responses across
 history, including gaps lasting several days. Existing forecasts keep their
-original values and publication timestamps. A delayed forecast is evaluated in
-the same way once its actual prices are available.
+original values and publication timestamps. Delayed and backfilled forecasts are
+still evaluated for audit, but only forecasts created on `D-1` from 10:15 inclusive
+to 12:00 exclusive enter rolling production-performance claims.
 
 If a scheduled run arrives while the pipeline is busy, Databricks queues it.
 One run writes the shared tables at a time. The next run checks the remaining
 gaps, so a delayed API response does not require a separate recovery workflow.
-The website refreshes forecasts and evaluation results every minute, including
-settled days whose rolling metrics change after a backfill. Publication time is
-shown as recorded; monitoring messages describe model quality only.
+The website checks the date index every 15 minutes, unsettled forecasts every five
+minutes, and settled forecasts every 30 minutes. HTTP and server-side query caches
+prevent each browser refresh from waking the SQL warehouse. Publication status
+and the original creation time are shown explicitly.
 
 The model starts with the early EXAA auction price and learns a correction using
 boosted trees. Calibrated prediction intervals target 90% coverage. Results appear
@@ -81,9 +87,12 @@ See [Model and data](MODEL_DATA.md) for exact Bronze-to-Gold lineage and the
 training, prediction, evaluation, and backfill behavior. See
 [Experiments](EXPERIMENTS.md) for offline evidence and reproducible comparisons.
 
-**Reading the charts:** historical dates may contain observations without a stored
-model forecast. Load and generation inputs compare forecasts from the previous day
-with actual values from two days earlier; they represent different delivery days.
+**Reading the charts:** the main chart is the `SDAC - EXAA` spread, so zero means
+that unchanged EXAA would be exactly right. Historical dates may contain
+observations without a stored model forecast. Load and generation forecasts
+describe `D` but are displayed only when captured before the 12:00 cutoff. They
+are forward research context, not version 2 model features. Measured comparison
+curves from `D-2` are model inputs.
 
 ## Run locally
 

@@ -9,23 +9,18 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from delu.contracts import FEATURE_DATA_VERSION
 from delu.pipeline.gold import WEATHER_FEATURES
 
 QUARTERS_PER_DAY = 96
 TARGET_COLUMN = "price_de_lu_sdac_eur_per_mwh"
 BASELINE_COLUMN = "price_de_lu_exaa_eur_per_mwh"
-
 NUMERIC_FEATURES = (
     BASELINE_COLUMN,
     "price_at_exaa_eur_per_mwh",
     "price_de_lu_sdac_lag_1d_eur_per_mwh",
     "price_de_lu_sdac_lag_2d_eur_per_mwh",
     "price_de_lu_sdac_lag_7d_eur_per_mwh",
-    "load_day_ahead_forecast_mw",
-    "solar_day_ahead_forecast_mw",
-    "wind_onshore_day_ahead_forecast_mw",
-    "wind_offshore_day_ahead_forecast_mw",
-    "residual_load_day_ahead_forecast_mw",
     "load_actual_d_minus_2_mw",
     "solar_actual_d_minus_2_mw",
     "wind_onshore_actual_d_minus_2_mw",
@@ -130,6 +125,7 @@ def prepare_daily_data(
     required = (
         "delivery_date",
         "quarter_of_day",
+        "feature_data_version",
         "day_of_week",
         "month",
         TARGET_COLUMN,
@@ -141,6 +137,12 @@ def prepare_daily_data(
         raise ValueError("Gold contains no rows")
 
     data = frame.loc[:, list(dict.fromkeys(required))].copy()
+    versions = pd.to_numeric(data["feature_data_version"], errors="raise").unique()
+    if len(versions) != 1 or versions[0] != FEATURE_DATA_VERSION:
+        raise ValueError(
+            "Gold feature data version is incompatible: "
+            f"expected {FEATURE_DATA_VERSION}, found {versions.tolist()}"
+        )
     data["delivery_date"] = pd.to_datetime(
         data["delivery_date"], errors="raise"
     ).dt.date

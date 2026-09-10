@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
+from zoneinfo import ZoneInfo
 
 from databricks import sql
 from databricks.sdk.errors import DatabricksError
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, FiniteFloat
@@ -24,6 +25,19 @@ from .backend import (
 )
 
 LOGGER = logging.getLogger(__name__)
+BERLIN = ZoneInfo("Europe/Berlin")
+EXAA_SIGNAL_TIME = time(10, 15)
+SDAC_GATE_CLOSURE = time(12)
+PublicationStatus = Literal["on_time", "late", "backfill"]
+OPTIONAL_RESEARCH_FEATURES = frozenset(
+    {
+        "load_day_ahead_forecast_mw",
+        "solar_day_ahead_forecast_mw",
+        "wind_onshore_day_ahead_forecast_mw",
+        "wind_offshore_day_ahead_forecast_mw",
+        "residual_load_day_ahead_forecast_mw",
+    }
+)
 
 
 class Health(BaseModel):
@@ -45,6 +59,7 @@ class DateSummary(BaseModel):
     mae: float | None
     picp: float | None
     monitoring_status: str | None
+    publication_status: PublicationStatus | None
 
 
 class ForecastQuarter(BaseModel):
@@ -65,9 +80,9 @@ class ForecastMetrics(BaseModel):
     interval_score: float
     baseline_exaa_mae: float
     baseline_7d_mae: float
-    rolling_7d_mae: float
-    rolling_7d_baseline_exaa_mae: float
-    rolling_28d_picp: float
+    rolling_7d_mae: float | None
+    rolling_7d_baseline_exaa_mae: float | None
+    rolling_28d_picp: float | None
     monitoring_status: str
     monitoring_reasons: list[str]
     evaluated_at: datetime
@@ -77,6 +92,7 @@ class ForecastDay(BaseModel):
     delivery_date: date
     model_version: str
     predicted_at: datetime
+    publication_status: PublicationStatus
     nominal_coverage: float
     settled: bool
     metrics: ForecastMetrics | None
@@ -127,7 +143,11 @@ class ModelSummary(BaseModel):
     published_at: datetime
     target_coverage: float
     point_shrinkage: float
+    feature_data_version: int | None = None
     test_metrics: dict[str, float]
+    reference_metrics: dict[str, float] | None = None
+    mae_gain_interval: list[float] | None = None
+    empirical_mae_gain_interval: list[float] | None = None
     baseline_exaa_mae: float
     download_url: str
 
@@ -141,6 +161,33 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _publication_status(
+    delivery_date: date,
+    predicted_at: datetime,
+) -> PublicationStatus:
+    local = _as_utc(predicted_at).astimezone(BERLIN)
+    if local.date() != delivery_date - timedelta(days=1):
+        return "backfill"
+    local_time = local.time().replace(tzinfo=None)
+    if EXAA_SIGNAL_TIME <= local_time < SDAC_GATE_CLOSURE:
+        return "on_time"
+    if local_time >= SDAC_GATE_CLOSURE:
+        return "late"
+    return "backfill"
+
+
+def _cache_response(
+    response: Response,
+    *,
+    browser_seconds: int,
+    shared_seconds: int,
+) -> None:
+    response.headers["Cache-Control"] = (
+        f"public, max-age={browser_seconds}, s-maxage={shared_seconds}, "
+        "stale-if-error=604800"
+    )
 
 
 def _store(request: Request) -> SqlForecastStore:
@@ -191,10 +238,12 @@ def _forecast_response(day: date, rows: list[dict[str, Any]]) -> ForecastDay:
             reason for reason in reasons.split("; ") if reason
         ]
         metrics = ForecastMetrics.model_validate(metric_values)
+    published_at = _as_utc(predicted_at.pop())
     return ForecastDay(
         delivery_date=day,
         model_version=versions.pop(),
-        predicted_at=_as_utc(predicted_at.pop()),
+        predicted_at=published_at,
+        publication_status=_publication_status(day, published_at),
         nominal_coverage=coverage.pop(),
         settled=actual_count == 96,
         metrics=metrics,
@@ -254,15 +303,22 @@ def create_app(
 
     @application.get("/api/dates", response_model=list[DateSummary])
     def dates(
+        response: Response,
         backend: StoreDependency,
         limit: LimitQuery = 366,
     ) -> list[DateSummary]:
+        _cache_response(response, browser_seconds=60, shared_seconds=900)
         return [
             DateSummary.model_validate(
                 {
                     **row,
                     "predicted_at": (
                         _as_utc(row["predicted_at"]) if row["predicted_at"] else None
+                    ),
+                    "publication_status": (
+                        _publication_status(row["delivery_date"], row["predicted_at"])
+                        if row["predicted_at"]
+                        else None
                     ),
                 }
             )
@@ -272,12 +328,23 @@ def create_app(
     @application.get("/api/forecasts/{delivery_date}", response_model=ForecastDay)
     def forecast(
         delivery_date: date,
+        response: Response,
         backend: StoreDependency,
     ) -> ForecastDay:
-        return _forecast_response(delivery_date, backend.forecast(delivery_date))
+        result = _forecast_response(delivery_date, backend.forecast(delivery_date))
+        _cache_response(
+            response,
+            browser_seconds=300 if not result.settled else 1_800,
+            shared_seconds=300 if not result.settled else 3_600,
+        )
+        return result
 
     @application.get("/api/observations/{delivery_date}", response_model=ObservationDay)
-    def observations(delivery_date: date, backend: StoreDependency) -> ObservationDay:
+    def observations(
+        delivery_date: date,
+        response: Response,
+        backend: StoreDependency,
+    ) -> ObservationDay:
         rows = backend.observations(delivery_date)
         if not rows:
             raise HTTPException(status_code=404, detail="Market day not found")
@@ -285,6 +352,7 @@ def create_app(
             range(96)
         ):
             raise HTTPException(status_code=503, detail="Market day is incomplete")
+        _cache_response(response, browser_seconds=3_600, shared_seconds=43_200)
         return ObservationDay(
             delivery_date=delivery_date,
             quarters=[
@@ -303,6 +371,7 @@ def create_app(
     )
     def features(
         delivery_date: date,
+        response: Response,
         backend: StoreDependency,
     ) -> FeatureTable:
         rows = backend.features(delivery_date)
@@ -311,17 +380,34 @@ def create_app(
         if (
             len(rows) != 96
             or {int(row["quarter_of_day"]) for row in rows} != set(range(96))
-            or any(value is None for row in rows for value in row.values())
+            or any(
+                value is None
+                for row in rows
+                for key, value in row.items()
+                if key not in OPTIONAL_RESEARCH_FEATURES
+            )
         ):
             raise HTTPException(status_code=503, detail="Gold features are incomplete")
-        for row in rows:
-            row["delivery_start_local"] = _local_start(
-                delivery_date, int(row["quarter_of_day"])
-            )
-        return FeatureTable(delivery_date=delivery_date, rows=rows)
+        _cache_response(response, browser_seconds=3_600, shared_seconds=43_200)
+        return FeatureTable(
+            delivery_date=delivery_date,
+            rows=[
+                {
+                    **row,
+                    "delivery_start_local": _local_start(
+                        delivery_date, int(row["quarter_of_day"])
+                    ),
+                }
+                for row in rows
+            ],
+        )
 
     @application.get("/api/weather/{delivery_date}", response_model=WeatherDay)
-    def weather(delivery_date: date, backend: StoreDependency) -> WeatherDay:
+    def weather(
+        delivery_date: date,
+        response: Response,
+        backend: StoreDependency,
+    ) -> WeatherDay:
         rows = backend.weather(delivery_date)
         if not rows:
             raise HTTPException(status_code=404, detail="Weather inputs not found")
@@ -331,6 +417,7 @@ def create_app(
             or any(value is None for row in rows for value in row.values())
         ):
             raise HTTPException(status_code=503, detail="Weather inputs are incomplete")
+        _cache_response(response, browser_seconds=3_600, shared_seconds=43_200)
         return WeatherDay(
             delivery_date=delivery_date,
             model_run_date=delivery_date - timedelta(days=1),
@@ -348,13 +435,15 @@ def create_app(
         )
 
     @application.get("/api/model", response_model=ModelSummary)
-    def model(backend: StoreDependency) -> ModelSummary:
+    def model(response: Response, backend: StoreDependency) -> ModelSummary:
         try:
             info = backend.model_info()
         except ArtifactNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        info["download_url"] = "/api/downloads/model.zip"
-        return ModelSummary.model_validate(info)
+        _cache_response(response, browser_seconds=3_600, shared_seconds=3_600)
+        return ModelSummary.model_validate(
+            {**info, "download_url": "/api/downloads/model.zip"}
+        )
 
     @application.get("/api/downloads/gold.csv")
     def download_gold(

@@ -7,6 +7,7 @@ import pytest
 
 from delu.pipeline.bronze import WEATHER_FIELDS, WEATHER_LOCATIONS
 from delu.pipeline.silver import (
+    _parse_rows,
     _parse_weather_payload,
     _weather_value,
     parse_payload,
@@ -128,17 +129,44 @@ class ParsePayloadTest(TestCase):
                 date(2026, 1, 1),
             )
 
-    def test_non_finite_entsoe_value_is_rejected_before_storage(self) -> None:
-        with self.assertRaisesRegex(ValueError, "non-finite value"):
-            validate_payload(
-                payload(
-                    "2025-12-31T23:00Z",
-                    "2026-01-01T23:00Z",
-                    points=((1, float("nan")),),
-                ),
-                "de_lu.load.actual",
-                date(2026, 1, 1),
-            )
+
+@pytest.mark.parametrize(
+    ("ingested_at", "expected_rows"),
+    [
+        (datetime(2026, 9, 4, 9, 30, tzinfo=UTC), 96),
+        (datetime(2026, 9, 4, 10, 0, tzinfo=UTC), 0),
+        (datetime(2026, 9, 6, 10, 0, tzinfo=UTC), 0),
+    ],
+    ids=["captured-before-sdac", "at-sdac", "backfilled"],
+)
+def test_forecast_fundamentals_require_a_point_in_time_capture(
+    ingested_at: datetime,
+    expected_rows: int,
+) -> None:
+    points = tuple((position, float(position)) for position in range(1, 97))
+    raw = payload(
+        "2026-09-04T22:00Z",
+        "2026-09-05T22:00Z",
+        curve="A01",
+        points=points,
+    )
+
+    rows = _parse_rows([(date(2026, 9, 5), "de_lu.load.forecast", raw, ingested_at)])
+
+    assert len(rows) == expected_rows
+
+
+def test_non_finite_entsoe_value_is_rejected_before_storage() -> None:
+    with pytest.raises(ValueError, match="non-finite value"):
+        validate_payload(
+            payload(
+                "2025-12-31T23:00Z",
+                "2026-01-01T23:00Z",
+                points=((1, float("nan")),),
+            ),
+            "de_lu.load.actual",
+            date(2026, 1, 1),
+        )
 
 
 def test_weather_uses_temperature_fallback_and_keeps_only_next_day() -> None:

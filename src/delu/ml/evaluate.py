@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 from datetime import UTC, date, datetime, timedelta
+from typing import cast
 
 import mlflow
 import pandas as pd
@@ -15,7 +16,13 @@ from pyspark.sql import functions as F
 
 from delu.ml.metrics import forecast_metrics
 from delu.ml.monitoring import assess_drift
-from delu.ml.predict import FORECAST_RUN_TABLE, FORECAST_TABLE
+from delu.ml.predict import (
+    EXAA_SIGNAL_TIME,
+    FORECAST_RUN_TABLE,
+    FORECAST_TABLE,
+    SDAC_GATE_CLOSURE,
+    publication_status,
+)
 from delu.ml.tables import merge_delta
 from delu.ml.train import MODEL_NAME, TARGET_COVERAGE
 from delu.pipeline.bronze import BERLIN, DEFAULT_START
@@ -59,7 +66,7 @@ def _evaluation_dates(
     if spark.catalog.tableExists(METRICS_TABLE):
         pending = eligible.join(
             spark.table(METRICS_TABLE)
-            .where(~F.col("monitoring_status").isin("pending", "late"))
+            .where(F.col("monitoring_status") != "pending")
             .select("delivery_date"),
             "delivery_date",
             "left_anti",
@@ -133,6 +140,10 @@ def evaluate_day(
     predicted_at = joined["predicted_at"].unique()
     if len(predicted_at) != 1:
         raise ValueError("Forecast rows contain multiple prediction timestamps")
+    status = publication_status(
+        delivery_date,
+        cast(datetime, pd.Timestamp(predicted_at[0]).to_pydatetime()),
+    )
     metrics = forecast_metrics(
         joined["price_de_lu_sdac_eur_per_mwh"],
         joined["predicted_price_eur_per_mwh"],
@@ -168,17 +179,37 @@ def evaluate_day(
         ]
     )
     if spark.catalog.tableExists(METRICS_TABLE):
+        publication = (
+            spark.table(FORECAST_TABLE)
+            .where(F.col("delivery_date") < F.lit(delivery_date))
+            .groupBy("delivery_date")
+            .agg(F.max("predicted_at").alias("predicted_at"))
+        )
+        local_timestamp = F.from_utc_timestamp(F.col("predicted_at"), "Europe/Berlin")
+        local_time = F.date_format(local_timestamp, "HH:mm:ss")
         prior = (
             spark.table(METRICS_TABLE)
             .where(F.col("delivery_date") < F.lit(delivery_date))
             .where(F.col("monitoring_status") != "pending")
+            .join(publication, "delivery_date", "inner")
+            .where(
+                (F.to_date(local_timestamp) == F.date_sub("delivery_date", 1))
+                & (local_time >= EXAA_SIGNAL_TIME.isoformat())
+                & (local_time < SDAC_GATE_CLOSURE.isoformat())
+            )
         )
         prior_history = (
             prior.select(*history_columns).orderBy("delivery_date").toPandas()
         )
-        history = pd.concat([prior_history, current_history], ignore_index=True)
+        history = (
+            pd.concat([prior_history, current_history], ignore_index=True)
+            if status == "on_time"
+            else prior_history
+        )
     else:
-        history = current_history
+        history = (
+            current_history if status == "on_time" else current_history.iloc[:0].copy()
+        )
     run = (
         spark.table(FORECAST_RUN_TABLE)
         .where(F.col("delivery_date") == F.lit(delivery_date))
@@ -193,8 +224,12 @@ def evaluate_day(
     reference_mae = None if reference is None else float(reference)
     monitoring = assess_drift(
         history,
-        data_outlier_rate=float(run.data_outlier_rate),
-        prediction_mean_z=float(run.prediction_mean_z),
+        data_outlier_rate=(
+            float(run.data_outlier_rate) if status == "on_time" else 0.0
+        ),
+        prediction_mean_z=(
+            float(run.prediction_mean_z) if status == "on_time" else 0.0
+        ),
         reference_mae=reference_mae,
         target_coverage=TARGET_COVERAGE,
     )
@@ -207,13 +242,38 @@ def evaluate_day(
             "rolling_28d_picp": monitoring.rolling_28d_picp,
         }
     )
+    metric_frame = pd.DataFrame([metric_row])
+    rolling_columns = (
+        "rolling_7d_mae",
+        "rolling_7d_baseline_exaa_mae",
+        "rolling_28d_picp",
+    )
+    for column in rolling_columns:
+        metric_frame[column] = pd.to_numeric(
+            metric_frame[column], errors="coerce"
+        ).astype(float)
+    updates = spark.createDataFrame(metric_frame)
+    for column in rolling_columns:
+        updates = updates.withColumn(
+            column,
+            F.when(F.isnan(column), F.lit(None).cast("double")).otherwise(
+                F.col(column)
+            ),
+        )
     merge_delta(
         spark,
-        spark.createDataFrame(pd.DataFrame([metric_row])),
+        updates,
         table=METRICS_TABLE,
         keys=("delivery_date",),
     )
-    LOGGER.info("Evaluated %s: %s", delivery_date, metrics)
+    LOGGER.info("Evaluated %s (%s): %s", delivery_date, status, metrics)
+    if status != "on_time":
+        LOGGER.warning(
+            "%s forecast for %s is retained for backfill completeness but "
+            "excluded from production rolling performance",
+            status,
+            delivery_date,
+        )
     if monitoring.reasons:
         message = "; ".join(monitoring.reasons)
         LOGGER.warning("Forecast monitoring alert for %s: %s", delivery_date, message)

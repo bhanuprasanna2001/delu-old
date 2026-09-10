@@ -38,6 +38,7 @@ def test_backfill_includes_five_missing_days_and_their_lagged_inputs() -> None:
     assert (date(2026, 9, 8), "de_lu.price.exaa") in requests_by_day
     assert (date(2026, 8, 28), "de_lu.price.sdac") in requests_by_day
     assert (date(2026, 9, 2), "de_lu.load.actual") in requests_by_day
+    assert (date(2026, 9, 8), "de_lu.load.forecast") in requests_by_day
     assert (date(2026, 9, 7), "weather.ecmwf_ifs.land") in requests_by_day
     assert len(planned) == len(requests_by_day)
 
@@ -50,7 +51,8 @@ def test_current_day_plan_requests_prices_and_weather_without_a_time_gate() -> N
     assert {
         (date(2026, 9, 10), series) for series, *_ in SDAC + EXAA
     } <= requests_by_day
-    assert {(today, series) for series, *_ in FORECAST + WEATHER} <= requests_by_day
+    assert {(date(2026, 9, 10), series) for series, *_ in FORECAST} <= requests_by_day
+    assert {(today, series) for series, *_ in WEATHER} <= requests_by_day
     assert {(date(2026, 9, 8), series) for series, *_ in ACTUAL} <= requests_by_day
 
 

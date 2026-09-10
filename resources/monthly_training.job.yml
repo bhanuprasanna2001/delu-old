@@ -4,6 +4,7 @@ resources:
       name: delu-monthly-training
       description: Train through the prior month, evaluate, register, and promote safely.
       max_concurrent_runs: 1
+      performance_target: STANDARD
       queue:
         enabled: true
       schedule:

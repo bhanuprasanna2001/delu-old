@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from delu.contracts import FEATURE_DATA_VERSION
 from delu.ml.data import (
     BOOLEAN_FEATURES,
     FEATURE_NAMES,
@@ -27,6 +28,7 @@ def gold_frame(days: int = 8, *, include_future: bool = False) -> pd.DataFrame:
             row: dict[str, object] = {
                 "delivery_date": delivery_date,
                 "quarter_of_day": quarter,
+                "feature_data_version": FEATURE_DATA_VERSION,
                 "day_of_week": delivery_date.weekday(),
                 "month": delivery_date.month,
                 TARGET_COLUMN: float(day_index + quarter),
@@ -72,6 +74,14 @@ def test_prepare_daily_data_rejects_partial_targets_and_bad_day_shapes() -> None
     incomplete = gold_frame(2).iloc[:-1]
     with pytest.raises(ValueError, match="96 rows"):
         prepare_daily_data(incomplete, require_targets=True)
+
+
+def test_prepare_daily_data_rejects_an_old_feature_contract() -> None:
+    frame = gold_frame(1)
+    frame["feature_data_version"] = FEATURE_DATA_VERSION - 1
+
+    with pytest.raises(ValueError, match="feature data version is incompatible"):
+        prepare_daily_data(frame, require_targets=True)
 
 
 def test_temporal_split_never_shuffles_days() -> None:

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from typing import Literal
 
 import mlflow
 import mlflow.sklearn
@@ -15,6 +16,7 @@ from mlflow import MlflowClient
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
+from delu.contracts import FEATURE_DATA_VERSION
 from delu.ml.data import prepare_daily_data
 from delu.ml.model import ConformalPriceForecaster
 from delu.ml.tables import merge_delta
@@ -25,6 +27,30 @@ from delu.pipeline.gold import TABLE as GOLD_TABLE
 FORECAST_TABLE = "delu.gold.forecasts"
 FORECAST_RUN_TABLE = "delu.gold.forecast_runs"
 LOGGER = logging.getLogger(__name__)
+EXAA_SIGNAL_TIME = time(10, 15)
+SDAC_GATE_CLOSURE = time(12)
+PublicationStatus = Literal["on_time", "late", "backfill"]
+
+
+def publication_status(
+    delivery_date: date,
+    predicted_at: datetime,
+) -> PublicationStatus:
+    """Classify whether a stored forecast was usable in the auction window."""
+    timestamp = (
+        predicted_at.replace(tzinfo=UTC)
+        if predicted_at.tzinfo is None or predicted_at.utcoffset() is None
+        else predicted_at.astimezone(UTC)
+    )
+    local = timestamp.astimezone(BERLIN)
+    if local.date() != delivery_date - timedelta(days=1):
+        return "backfill"
+    local_time = local.time().replace(tzinfo=None)
+    if EXAA_SIGNAL_TIME <= local_time < SDAC_GATE_CLOSURE:
+        return "on_time"
+    if local_time >= SDAC_GATE_CLOSURE:
+        return "late"
+    return "backfill"
 
 
 def _drift_values(
@@ -86,6 +112,15 @@ def forecast_day(
     model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}/{version.version}")
     if not isinstance(model, ConformalPriceForecaster):
         raise TypeError("The production model has an incompatible Python type")
+    if getattr(model, "feature_data_version", 1) != FEATURE_DATA_VERSION:
+        LOGGER.warning(
+            "Waiting for a production model trained on feature data version %s; "
+            "model %s uses version %s",
+            FEATURE_DATA_VERSION,
+            version.version,
+            getattr(model, "feature_data_version", 1),
+        )
+        return None
     prediction = model.predict(daily.features)[0]
     if not np.isfinite(prediction).all() or np.any(prediction[:, 1] > prediction[:, 2]):
         raise ValueError("The production model returned invalid prediction intervals")
@@ -95,6 +130,7 @@ def forecast_day(
     )
     published_at = current if now is not None else datetime.now(UTC)
     predicted_at = published_at.astimezone(UTC).replace(tzinfo=None)
+    status = publication_status(delivery_date, published_at)
     sorted_gold = gold.sort_values("quarter_of_day")
     forecast = pd.DataFrame(
         {
@@ -115,6 +151,7 @@ def forecast_day(
                 "delivery_date": delivery_date,
                 "model_version": version.version,
                 "predicted_at": predicted_at,
+                "publication_status": status,
                 "data_outlier_rate": outlier_rate,
                 "max_feature_mean_z": max_feature_mean_z,
                 "prediction_mean_z": prediction_mean_z,
@@ -132,9 +169,11 @@ def forecast_day(
         spark.createDataFrame(run),
         table=FORECAST_RUN_TABLE,
         keys=("delivery_date",),
+        evolve_schema=True,
     )
     LOGGER.info(
-        "Saved 96 forecasts for %s using %s version %s",
+        "Saved 96 %s forecasts for %s using %s version %s",
+        status,
         delivery_date,
         MODEL_NAME,
         version.version,

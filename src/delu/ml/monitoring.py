@@ -11,9 +11,9 @@ import pandas as pd
 class MonitoringResult:
     status: str
     reasons: tuple[str, ...]
-    rolling_7d_mae: float
-    rolling_7d_baseline_exaa_mae: float
-    rolling_28d_picp: float
+    rolling_7d_mae: float | None
+    rolling_7d_baseline_exaa_mae: float | None
+    rolling_28d_picp: float | None
 
 
 def assess_drift(
@@ -27,8 +27,16 @@ def assess_drift(
     """Assess input, output, performance, and interval-coverage drift."""
     required = {"delivery_date", "mae", "baseline_exaa_mae", "picp"}
     missing = sorted(required.difference(history.columns))
-    if missing or history.empty:
+    if missing:
         raise ValueError(f"Metric history is missing data: {missing}")
+    if history.empty:
+        return MonitoringResult(
+            status="ok",
+            reasons=(),
+            rolling_7d_mae=None,
+            rolling_7d_baseline_exaa_mae=None,
+            rolling_28d_picp=None,
+        )
 
     ordered = history.sort_values("delivery_date")
     rolling_7d_mae = float(ordered.tail(7)["mae"].mean())

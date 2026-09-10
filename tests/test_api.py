@@ -67,9 +67,13 @@ def test_forecast_endpoint_returns_complete_settled_day() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["settled"] is True
+    assert payload["publication_status"] == "on_time"
     assert payload["metrics"]["mae"] == 10.0
     assert len(payload["quarters"]) == 96
     assert payload["quarters"][0]["delivery_start_local"] == "2026-09-05T00:00:00"
+    assert response.headers["cache-control"] == (
+        "public, max-age=1800, s-maxage=3600, stale-if-error=604800"
+    )
 
 
 def test_forecast_endpoint_rejects_partial_grid() -> None:
@@ -137,7 +141,11 @@ def test_dates_include_observations_without_forecast_metadata() -> None:
     assert response.status_code == 200
     assert response.json()[0]["has_forecast"] is False
     assert response.json()[0]["predicted_at"] is None
+    assert response.json()[0]["publication_status"] is None
     assert response.json()[0]["has_actual"] is True
+    assert response.headers["cache-control"] == (
+        "public, max-age=60, s-maxage=900, stale-if-error=604800"
+    )
 
 
 def test_observations_never_fabricate_forecasts() -> None:

@@ -4,11 +4,12 @@ resources:
       name: delu-data-pipeline
       description: Retry missing data, build ready days, forecast, and evaluate.
       max_concurrent_runs: 1
+      performance_target: STANDARD
       queue:
         enabled: true
       schedule:
-        quartz_cron_expression: "0 0/30 * * * ?"
-        timezone_id: UTC
+        quartz_cron_expression: "0 30 2,10,11,13 * * ?"
+        timezone_id: Europe/Berlin
         pause_status: ${var.schedule_pause_status}
       parameters:
         - name: start

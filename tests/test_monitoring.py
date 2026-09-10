@@ -39,6 +39,21 @@ def test_monitoring_stays_quiet_for_healthy_forecasts() -> None:
     assert result.reasons == ()
 
 
+def test_monitoring_has_no_rolling_claim_without_on_time_history() -> None:
+    result = assess_drift(
+        history(0),
+        data_outlier_rate=0.0,
+        prediction_mean_z=0.0,
+        reference_mae=9.0,
+        target_coverage=0.9,
+    )
+
+    assert result.status == "ok"
+    assert result.rolling_7d_mae is None
+    assert result.rolling_7d_baseline_exaa_mae is None
+    assert result.rolling_28d_picp is None
+
+
 def test_monitoring_reports_data_and_performance_drift() -> None:
     result = assess_drift(
         history(14, mae=20.0, baseline_exaa_mae=10.0, picp=0.7),
