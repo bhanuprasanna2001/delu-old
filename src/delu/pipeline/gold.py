@@ -22,7 +22,6 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-from delu.contracts import FEATURE_DATA_VERSION
 from delu.pipeline.bronze import (
     BERLIN,
     PRICE_LAGS,
@@ -66,10 +65,16 @@ FEATURE_COLUMNS = (
     "price_de_lu_exaa_eur_per_mwh",
     "price_at_exaa_eur_per_mwh",
     *(f"price_de_lu_sdac_lag_{days}d_eur_per_mwh" for days in PRICE_LAGS),
-    "load_actual_d_minus_2_mw",
-    "solar_actual_d_minus_2_mw",
-    "wind_onshore_actual_d_minus_2_mw",
-    "wind_offshore_actual_d_minus_2_mw",
+    *(
+        "load_day_ahead_forecast_mw",
+        "solar_day_ahead_forecast_mw",
+        "wind_onshore_day_ahead_forecast_mw",
+        "wind_offshore_day_ahead_forecast_mw",
+        "load_actual_d_minus_2_mw",
+        "solar_actual_d_minus_2_mw",
+        "wind_onshore_actual_d_minus_2_mw",
+        "wind_offshore_actual_d_minus_2_mw",
+    ),
     *WEATHER_FEATURES,
 )
 LOGGER = logging.getLogger(__name__)
@@ -296,15 +301,18 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
         EXAA,
         ("price_de_lu_exaa_eur_per_mwh", "price_at_exaa_eur_per_mwh"),
     )
-    forecast = _wide(
-        intervals,
-        FORECAST,
-        (
-            "load_day_ahead_forecast_mw",
-            "solar_day_ahead_forecast_mw",
-            "wind_onshore_day_ahead_forecast_mw",
-            "wind_offshore_day_ahead_forecast_mw",
+    forecast = _shift_date(
+        _wide(
+            intervals,
+            FORECAST,
+            (
+                "load_day_ahead_forecast_mw",
+                "solar_day_ahead_forecast_mw",
+                "wind_onshore_day_ahead_forecast_mw",
+                "wind_offshore_day_ahead_forecast_mw",
+            ),
         ),
+        1,
     )
     actual = _shift_date(
         _wide(
@@ -322,7 +330,7 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
     weather = _wide(intervals, WEATHER_SERIES, WEATHER_FEATURES)
 
     result = (
-        exaa.join(forecast, KEY, "left")
+        exaa.join(forecast, KEY, "inner")
         .join(actual, KEY, "inner")
         .join(weather, KEY, "inner")
         .join(target, KEY, "left")
@@ -368,13 +376,11 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
         result.join(_calendar_frame(spark, bounds.start, bounds.end), KEY, "inner")
         .join(holidays, "delivery_date", "left")
         .fillna({"is_holiday_de_nationwide": False, "is_holiday_lu": False})
-        .withColumn("feature_data_version", F.lit(FEATURE_DATA_VERSION))
     )
 
     output_columns = [
         "delivery_date",
         "delivery_start_local",
-        "feature_data_version",
         "hour",
         "quarter",
         "quarter_of_day",

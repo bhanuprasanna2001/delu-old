@@ -11,8 +11,6 @@ from sklearn.base import BaseEstimator
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.utils.validation import check_is_fitted
 
-from delu.contracts import FEATURE_DATA_VERSION
-
 
 @dataclass(frozen=True)
 class BoostingConfig:
@@ -85,7 +83,6 @@ class ConformalPriceForecaster(BaseEstimator):
         feature_count: int,
         reference_feature_index: int,
         *,
-        feature_data_version: int = FEATURE_DATA_VERSION,
         horizon: int = 96,
         coverage: float = 0.9,
         calibration_days: int = 28,
@@ -95,7 +92,6 @@ class ConformalPriceForecaster(BaseEstimator):
     ) -> None:
         self.feature_count = feature_count
         self.reference_feature_index = reference_feature_index
-        self.feature_data_version = feature_data_version
         self.horizon = horizon
         self.coverage = coverage
         self.calibration_days = calibration_days
@@ -124,15 +120,7 @@ class ConformalPriceForecaster(BaseEstimator):
         actual = np.asarray(targets, dtype=np.float32)
         if actual.shape != values.shape[:2] or not np.isfinite(actual).all():
             raise ValueError("targets must be finite with shape [day, quarter]")
-        if (
-            min(
-                self.feature_count,
-                self.feature_data_version,
-                self.horizon,
-                self.calibration_days,
-            )
-            < 1
-        ):
+        if min(self.feature_count, self.horizon, self.calibration_days) < 1:
             raise ValueError("model dimensions and calibration_days must be positive")
         if not 0 <= self.reference_feature_index < self.feature_count:
             raise ValueError("reference_feature_index is outside the feature array")

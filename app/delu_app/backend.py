@@ -5,21 +5,18 @@ from __future__ import annotations
 import csv
 import io
 import json
-import logging
 import os
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import date
-from threading import Lock
-from time import monotonic
 from typing import Any, BinaryIO
 
 from databricks import sql
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
-from databricks.sdk.errors import DatabricksError, NotFound
+from databricks.sdk.errors import NotFound
 
 _TABLE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*\."
@@ -65,13 +62,6 @@ _WEATHER_METRICS = (
     "shortwave_radiation_w_m2",
     "cloud_cover_pct",
 )
-_HEALTH_CACHE_SECONDS = 5 * 60
-_DATES_CACHE_SECONDS = 15 * 60
-_FORECAST_CACHE_SECONDS = 5 * 60
-_SETTLED_DATA_CACHE_SECONDS = 12 * 60 * 60
-_STALE_CACHE_SECONDS = 7 * 24 * 60 * 60
-_MAX_CACHE_ENTRIES = 512
-LOGGER = logging.getLogger(__name__)
 
 
 def _weather_mean(metric: str) -> str:
@@ -139,12 +129,6 @@ class FileDownload:
     size: int | None
 
 
-@dataclass(frozen=True)
-class _QueryCacheEntry:
-    rows: tuple[dict[str, Any], ...]
-    stored_at: float
-
-
 class SqlForecastStore:
     """Read forecasts and features through a SQL warehouse."""
 
@@ -154,16 +138,10 @@ class SqlForecastStore:
         *,
         config: Config | None = None,
         workspace: WorkspaceClient | None = None,
-        clock: Callable[[], float] = monotonic,
     ) -> None:
         self.settings = settings
         self._config = config or Config()
         self._workspace = workspace or WorkspaceClient(config=self._config)
-        self._clock = clock
-        self._cache: dict[
-            tuple[str, tuple[tuple[str, object], ...]], _QueryCacheEntry
-        ] = {}
-        self._cache_lock = Lock()
 
     @classmethod
     def from_env(cls) -> SqlForecastStore:
@@ -184,48 +162,14 @@ class SqlForecastStore:
         self,
         statement: str,
         parameters: dict[str, object] | None = None,
-        *,
-        max_age_seconds: int,
     ) -> list[dict[str, Any]]:
-        query_parameters = parameters or {}
-        key = (statement, tuple(sorted(query_parameters.items())))
-        now = self._clock()
-        with self._cache_lock:
-            cached = self._cache.get(key)
-            if cached is not None and now - cached.stored_at <= max_age_seconds:
-                return [row.copy() for row in cached.rows]
-
-        try:
-            with (
-                closing(self._connect()) as connection,
-                closing(connection.cursor()) as cursor,
-            ):
-                cursor.execute(statement, query_parameters)
-                columns = [column[0] for column in cursor.description]
-                rows = [
-                    dict(zip(columns, row, strict=True)) for row in cursor.fetchall()
-                ]
-        except (sql.Error, DatabricksError):
-            with self._cache_lock:
-                stale = self._cache.get(key)
-            if stale is None or now - stale.stored_at > _STALE_CACHE_SECONDS:
-                raise
-            LOGGER.warning(
-                "Serving a cached Databricks response after a warehouse failure",
-                exc_info=True,
-            )
-            return [row.copy() for row in stale.rows]
-
-        entry = _QueryCacheEntry(tuple(row.copy() for row in rows), now)
-        with self._cache_lock:
-            if len(self._cache) >= _MAX_CACHE_ENTRIES and key not in self._cache:
-                oldest = min(
-                    self._cache,
-                    key=lambda cached_key: self._cache[cached_key].stored_at,
-                )
-                del self._cache[oldest]
-            self._cache[key] = entry
-        return [row.copy() for row in rows]
+        with (
+            closing(self._connect()) as connection,
+            closing(connection.cursor()) as cursor,
+        ):
+            cursor.execute(statement, parameters or {})
+            columns = [column[0] for column in cursor.description]
+            return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
     def health(self) -> dict[str, Any]:
         """Return the latest persisted forecast and settlement state."""
@@ -240,8 +184,7 @@ class SqlForecastStore:
                  ORDER BY delivery_date DESC LIMIT 1) AS model_version,
               (SELECT monitoring_status FROM {self.settings.metrics_table}
                  ORDER BY delivery_date DESC LIMIT 1) AS monitoring_status
-            """,
-            max_age_seconds=_HEALTH_CACHE_SECONDS,
+            """
         )
         if len(rows) != 1:
             raise RuntimeError("Health query returned an unexpected result")
@@ -279,7 +222,6 @@ class SqlForecastStore:
             LIMIT :limit
             """,
             {"limit": limit},
-            max_age_seconds=_DATES_CACHE_SECONDS,
         )
 
     def forecast(self, delivery_date: date) -> list[dict[str, Any]]:
@@ -305,7 +247,6 @@ class SqlForecastStore:
             ORDER BY f.quarter_of_day
             """,
             {"delivery_date": delivery_date},
-            max_age_seconds=_FORECAST_CACHE_SECONDS,
         )
 
     def features(self, delivery_date: date) -> list[dict[str, Any]]:
@@ -333,7 +274,6 @@ class SqlForecastStore:
             ORDER BY quarter_of_day
             """,
             {"delivery_date": delivery_date},
-            max_age_seconds=_SETTLED_DATA_CACHE_SECONDS,
         )
 
     def weather(self, delivery_date: date) -> list[dict[str, Any]]:
@@ -346,7 +286,6 @@ class SqlForecastStore:
             ORDER BY quarter_of_day
             """,
             {"delivery_date": delivery_date},
-            max_age_seconds=_SETTLED_DATA_CACHE_SECONDS,
         )
 
     def observations(self, delivery_date: date) -> list[dict[str, Any]]:
@@ -361,7 +300,6 @@ class SqlForecastStore:
             ORDER BY quarter_of_day
             """,
             {"delivery_date": delivery_date},
-            max_age_seconds=_SETTLED_DATA_CACHE_SECONDS,
         )
 
     def gold_csv(self, through: date | None) -> Iterator[bytes]:

@@ -3,7 +3,6 @@ import { z } from 'zod'
 const number = z.number().finite()
 export const dateSchema = z.iso.date()
 const quarter = z.number().int().min(0).max(95)
-const publicationStatus = z.enum(['on_time', 'late', 'backfill'])
 const grid = <T extends z.ZodType<{ quarter_of_day: number }>>(schema: T) =>
   z.array(schema).length(96).refine(rows => new Set(rows.map(row => row.quarter_of_day)).size === 96, 'Incomplete quarter-hour grid')
 
@@ -15,19 +14,17 @@ export const datesSchema = z.array(z.object({
   has_forecast: z.boolean().default(true),
   has_actual: z.boolean().optional(),
   has_metrics: z.boolean().optional(),
-  publication_status: publicationStatus.nullable(),
 })).transform(days => days.toSorted((a, b) => b.delivery_date.localeCompare(a.delivery_date)))
 
 const metricsSchema = z.object({
   mae: number, rmse: number, bias: number, picp: number, mpiw: number,
   interval_score: number, baseline_exaa_mae: number, baseline_7d_mae: number,
-  rolling_7d_mae: number.nullable(), rolling_7d_baseline_exaa_mae: number.nullable(), rolling_28d_picp: number.nullable(),
+  rolling_7d_mae: number, rolling_7d_baseline_exaa_mae: number, rolling_28d_picp: number,
   monitoring_status: z.string(), monitoring_reasons: z.array(z.string()), evaluated_at: z.string(),
 })
 
 export const forecastSchema = z.object({
   delivery_date: dateSchema, model_version: z.string(), predicted_at: z.string(),
-  publication_status: publicationStatus,
   nominal_coverage: number.min(0).max(1), settled: z.boolean(), metrics: metricsSchema.nullable(),
   quarters: grid(z.object({
     quarter_of_day: quarter,
@@ -54,11 +51,11 @@ export const featuresSchema = z.object({
     price_de_lu_sdac_lag_1d_eur_per_mwh: number,
     price_de_lu_sdac_lag_2d_eur_per_mwh: number,
     price_de_lu_sdac_lag_7d_eur_per_mwh: number,
-    load_day_ahead_forecast_mw: number.nullable(), load_actual_d_minus_2_mw: number,
-    solar_day_ahead_forecast_mw: number.nullable(), solar_actual_d_minus_2_mw: number,
-    wind_onshore_day_ahead_forecast_mw: number.nullable(), wind_onshore_actual_d_minus_2_mw: number,
-    wind_offshore_day_ahead_forecast_mw: number.nullable(), wind_offshore_actual_d_minus_2_mw: number,
-    residual_load_day_ahead_forecast_mw: number.nullable(), residual_load_actual_d_minus_2_mw: number,
+    load_day_ahead_forecast_mw: number, load_actual_d_minus_2_mw: number,
+    solar_day_ahead_forecast_mw: number, solar_actual_d_minus_2_mw: number,
+    wind_onshore_day_ahead_forecast_mw: number, wind_onshore_actual_d_minus_2_mw: number,
+    wind_offshore_day_ahead_forecast_mw: number, wind_offshore_actual_d_minus_2_mw: number,
+    residual_load_day_ahead_forecast_mw: number, residual_load_actual_d_minus_2_mw: number,
     day_of_week: z.number().int(), month: z.number().int(), season: z.string(),
     is_weekend: z.boolean(), is_holiday_de_nationwide: z.boolean(), is_holiday_lu: z.boolean(),
   })),
@@ -77,11 +74,7 @@ export const weatherSchema = z.object({
 export const modelSchema = z.object({
   model_name: z.string(), model_family: z.string(), version: z.string(),
   training_through: dateSchema, published_at: z.string(), target_coverage: number,
-  point_shrinkage: number, feature_data_version: z.number().int().positive().nullish(),
-  test_metrics: z.record(z.string(), number), baseline_exaa_mae: number,
-  reference_metrics: z.record(z.string(), number).nullish(),
-  mae_gain_interval: z.array(number).length(3).nullish(),
-  empirical_mae_gain_interval: z.array(number).length(3).nullish(),
+  point_shrinkage: number, test_metrics: z.record(z.string(), number), baseline_exaa_mae: number,
 })
 
 export type DateSummary = z.infer<typeof datesSchema>[number]
@@ -101,29 +94,19 @@ export type PricePoint = {
   interval: [number, number] | null
   exaa: number | null
   austria: number | null
-  actualSpread: number | null
-  forecastSpread: number | null
-  intervalSpread: [number, number] | null
 }
 
 export function pricePoints(day: Forecast | Observations, features?: Features): PricePoint[] {
   const inputs = new Map(features?.rows.map(row => [row.quarter_of_day, row]))
   return day.quarters.map(row => {
     const feature = inputs.get(row.quarter_of_day)
-    const actual = row.actual_price_eur_per_mwh
-    const forecast = 'predicted_price_eur_per_mwh' in row ? row.predicted_price_eur_per_mwh : null
-    const interval = 'lower_price_eur_per_mwh' in row ? [row.lower_price_eur_per_mwh, row.upper_price_eur_per_mwh] as [number, number] : null
-    const exaa = 'price_de_lu_exaa_eur_per_mwh' in row ? row.price_de_lu_exaa_eur_per_mwh : feature?.price_de_lu_exaa_eur_per_mwh ?? null
     return {
       quarter: row.quarter_of_day,
-      actual,
-      forecast,
-      interval,
-      exaa,
+      actual: row.actual_price_eur_per_mwh,
+      forecast: 'predicted_price_eur_per_mwh' in row ? row.predicted_price_eur_per_mwh : null,
+      interval: 'lower_price_eur_per_mwh' in row ? [row.lower_price_eur_per_mwh, row.upper_price_eur_per_mwh] as [number, number] : null,
+      exaa: 'price_de_lu_exaa_eur_per_mwh' in row ? row.price_de_lu_exaa_eur_per_mwh : feature?.price_de_lu_exaa_eur_per_mwh ?? null,
       austria: 'price_at_exaa_eur_per_mwh' in row ? row.price_at_exaa_eur_per_mwh : feature?.price_at_exaa_eur_per_mwh ?? null,
-      actualSpread: actual == null || exaa == null ? null : actual - exaa,
-      forecastSpread: forecast == null || exaa == null ? null : forecast - exaa,
-      intervalSpread: interval == null || exaa == null ? null : [interval[0] - exaa, interval[1] - exaa] as [number, number],
     }
   }).sort((a, b) => a.quarter - b.quarter)
 }
@@ -156,11 +139,4 @@ export const todayBerlin = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'E
 export function dayStatus(day: DateSummary) {
   if (!day.has_forecast) return { label: 'Historical observation', tone: 'neutral' }
   return day.settled ? { label: 'Settled', tone: 'settled' } : { label: 'Forecast only', tone: 'pending' }
-}
-
-export function publicationLabel(status: DateSummary['publication_status']) {
-  if (status === 'on_time') return 'On-time forecast'
-  if (status === 'late') return 'Late forecast'
-  if (status === 'backfill') return 'Backfilled forecast'
-  return 'Publication time unavailable'
 }

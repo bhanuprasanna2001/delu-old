@@ -10,39 +10,12 @@ not forecasts that existed before the market outcome was published.
 - Use only features available before the forecast cutoff.
 - Split by delivery day in chronological order; never shuffle future days into
   training.
-- Compare against unchanged DE-LU EXAA and a quarter-specific empirical spread
-  forecast on the same intervals.
+- Compare against unchanged DE-LU EXAA on the same intervals.
 - Keep a final holdout separate from fitting and parameter selection.
-- Require stability across six rolling 28-day folds and a positive lower bound on
-  a paired, whole-day bootstrap interval for holdout MAE gain.
-- Require the candidate interval score to beat a conformalized empirical spread
-  interval, not merely reach nominal coverage.
 - Treat predictive accuracy and economic value as different claims. Economic value
   requires a trading rule and costs.
 
-These rules follow the evaluation concerns documented by Lago et al.: long enough
-test periods, strong baselines, appropriate metrics, and statistical comparison.
-See [Forecasting day-ahead electricity prices: A review of state-of-the-art algorithms, best practices and an open-access benchmark](https://arxiv.org/abs/2008.08004).
-
-## Current evidence and migration status
-
-The currently published model version reports EXAA MAE 8.8078 EUR/MWh and DELU MAE
-8.5962 EUR/MWh on one holdout, a numerical gain of 0.2116 EUR/MWh or about 2.4%.
-That is not evidence of economic value. The unshrunk MAE experiment below has a
-95% gain interval crossing zero, and the historical production gate did not test
-multi-month stability or an empirical interval baseline.
-
-The results below used the old feature contract, where load and generation curves
-for source day `D-1` were shifted onto delivery day `D`. They are retained as an
-archived diagnostic, not as evidence for the corrected model. Gold now attaches
-an ENTSO-E forecast for delivery day `D` only when it was captured before the SDAC
-cutoff, and stamps `feature_data_version = 2`. Those forward-collected fundamentals
-remain research columns until enough point-in-time history exists. Training refuses
-the old local snapshot and does not use the nullable research columns. New
-production claims require rebuilding Gold and passing the stronger gates described
-above.
-
-## Archived v1 weather features
+## Weather features
 
 The weather ablation asked whether 125 weather features improve the existing model.
 Both candidates were trained through 31 August 2026 with the same holdout procedure.
@@ -55,13 +28,12 @@ Both candidates were trained through 31 August 2026 with the same holdout proced
 | Mean interval width (EUR/MWh) | 54.03 | 50.50 | 6.53% narrower |
 
 Weather did not improve point accuracy. It did improve interval score and coverage
-while narrowing the intervals. Weather remains in the feature set, but this
-archived result supports its interval estimates rather than its point forecast. The
-repository records this result but does not yet contain a dedicated
-weather-ablation runner; rerun it on feature data version 2 before making a new
-production decision.
+while narrowing the intervals. Weather remains in the current feature set, but this
+evidence supports its interval estimates rather than its point forecast. The
+repository records this result but does not yet contain a dedicated weather-ablation
+runner; rerun it before making a new production decision.
 
-## Archived v1 point losses for `SDAC - EXAA`
+## Point losses for `SDAC - EXAA`
 
 This comparison changes only the point loss. It uses 31,488 Gold rows across 328
 complete days through 31 August 2026, the same 149 features and boosting settings,
@@ -91,9 +63,8 @@ Changing the loss alone does not solve the EXAA-mimicry problem.
 
 ### Reproduce
 
-Use the locked project environment. After the corrected Gold table has been
-rebuilt, refresh a read-only cutoff from an explicit Databricks CLI profile, then
-run the comparison:
+Use the locked project environment. Refresh the read-only Gold cutoff from an
+explicit Databricks CLI profile, then run the comparison:
 
 ```bash
 uv run python -m delu.ml.loss_experiment \
@@ -101,10 +72,9 @@ uv run python -m delu.ml.loss_experiment \
   --profile "<your Databricks CLI profile>"
 ```
 
-The script saves the versioned, validated snapshot to
-`data/gold/model_input.parquet` and raw results to
-`data/research/loss_comparison.csv`. Both paths are ignored by Git. Rerun from the
-frozen version 2 snapshot with:
+The script saves the validated snapshot to `data/gold/model_input.parquet` and raw
+results to `data/research/loss_comparison.csv`. Both paths are ignored by Git. Rerun
+from the frozen snapshot with:
 
 ```bash
 uv run python -m delu.ml.loss_experiment

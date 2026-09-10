@@ -24,7 +24,6 @@ from delu.pipeline.bronze import (
     ALL,
     BERLIN,
     EXAA,
-    FORECAST,
     SDAC,
     WEATHER_FALLBACK_MODEL,
     WEATHER_FIELDS,
@@ -37,8 +36,6 @@ TABLE = "delu.silver.measurements"
 RESOLUTION = timedelta(minutes=15)
 KNOWN_SERIES = frozenset(request[0] for request in ALL)
 PRICE_SERIES = frozenset(request[0] for request in SDAC + EXAA)
-FORECAST_SERIES = frozenset(request[0] for request in FORECAST)
-SDAC_GATE_CLOSURE = time(12)
 LOGGER = logging.getLogger(__name__)
 SILVER_SCHEMA = StructType(
     [
@@ -425,18 +422,6 @@ def _parse_rows(
 ) -> list[tuple[date, datetime, str, float, str, datetime]]:
     parsed = []
     for delivery_date, series, payload, ingested_at in rows:
-        if series in FORECAST_SERIES:
-            captured_at = (
-                ingested_at.replace(tzinfo=UTC)
-                if ingested_at.tzinfo is None or ingested_at.utcoffset() is None
-                else ingested_at.astimezone(UTC)
-            ).astimezone(BERLIN)
-            forecast_was_available = (
-                captured_at.date() == delivery_date - timedelta(days=1)
-                and captured_at.time().replace(tzinfo=None) < SDAC_GATE_CLOSURE
-            )
-            if not forecast_was_available:
-                continue
         if series.startswith(f"weather.{WEATHER_MODEL}."):
             parsed.extend(
                 (*row, ingested_at)

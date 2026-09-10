@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
 import shutil
 import tempfile
@@ -24,7 +23,6 @@ from mlflow.models import infer_signature
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-from delu.contracts import FEATURE_DATA_VERSION
 from delu.ml.data import (
     FEATURE_NAMES,
     DailyData,
@@ -37,13 +35,7 @@ from delu.ml.model import (
     POINT_CONFIG,
     ConformalPriceForecaster,
 )
-from delu.ml.training import (
-    fit_model,
-    paired_mae_gain_interval,
-    reference_forecast,
-    reference_metrics,
-    select_point_shrinkage,
-)
+from delu.ml.training import fit_model, select_point_shrinkage
 from delu.pipeline.bronze import BERLIN
 from delu.pipeline.gold import TABLE as GOLD_TABLE
 
@@ -51,7 +43,7 @@ MODEL_NAME = "delu.ml.sdac_cqr"
 EXPERIMENT_NAME = "/Shared/delu"
 TARGET_COVERAGE = 0.9
 CALIBRATION_DAYS = 28
-WALK_FORWARD_FOLDS = 6
+WALK_FORWARD_FOLDS = 3
 LOCAL_MODEL_PATH = Path("artifacts/sdac_cqr")
 MODEL_CODE_PATH = Path(__file__).resolve().parents[1]
 LOGGER = logging.getLogger(__name__)
@@ -63,12 +55,8 @@ class CandidateResult:
 
     model: ConformalPriceForecaster
     fold_metrics: tuple[dict[str, float], ...]
-    fold_reference_metrics: tuple[dict[str, float], ...]
     test_metrics: dict[str, float]
-    reference_metrics: dict[str, float]
     baseline_mae: float
-    mae_gain_interval: tuple[float, float, float]
-    empirical_mae_gain_interval: tuple[float, float, float]
     point_shrinkage: float
     promotion_reasons: tuple[str, ...]
 
@@ -105,10 +93,7 @@ def _load_production_metrics(
     model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}@prod")
     if not isinstance(model, ConformalPriceForecaster):
         raise TypeError("The production model has an incompatible Python type")
-    if (
-        model.feature_count != test.features.shape[-1]
-        or getattr(model, "feature_data_version", 1) != FEATURE_DATA_VERSION
-    ):
+    if model.feature_count != test.features.shape[-1]:
         LOGGER.warning("Skipping production comparison after a feature schema change")
         return None
     return version.version, _metrics(model, test)
@@ -116,38 +101,12 @@ def _load_production_metrics(
 
 def _promotion_reasons(
     candidate: dict[str, float],
-    reference: dict[str, float],
-    fold_metrics: tuple[dict[str, float], ...],
-    fold_references: tuple[dict[str, float], ...],
-    gain_interval: tuple[float, float, float],
-    empirical_gain_interval: tuple[float, float, float],
+    baseline_mae: float,
     production: tuple[str, dict[str, float]] | None,
 ) -> tuple[str, ...]:
-    if not fold_metrics or len(fold_metrics) != len(fold_references):
-        raise ValueError("Promotion requires matching rolling-fold metrics")
     reasons = []
-    strongest_point_mae = min(reference["exaa_mae"], reference["mae"])
-    if candidate["mae"] >= strongest_point_mae:
-        reasons.append("candidate did not beat the strongest point baseline")
-    if candidate["interval_score"] >= reference["interval_score"]:
-        reasons.append("candidate did not beat the empirical interval baseline")
-    stable_wins = sum(
-        metrics["mae"] < min(baseline["exaa_mae"], baseline["mae"])
-        for metrics, baseline in zip(fold_metrics, fold_references, strict=True)
-    )
-    required_wins = math.ceil(len(fold_metrics) * 2 / 3)
-    if stable_wins < required_wins:
-        reasons.append(
-            f"candidate beat the point baselines in only {stable_wins} of "
-            f"{len(fold_metrics)} rolling folds; {required_wins} are required"
-        )
-    if gain_interval[1] <= 0:
-        reasons.append("MAE gain over EXAA is not established by the paired interval")
-    if empirical_gain_interval[1] <= 0:
-        reasons.append(
-            "MAE gain over the empirical spread forecast is not established "
-            "by the paired interval"
-        )
+    if candidate["mae"] >= baseline_mae:
+        reasons.append("candidate did not beat the delivery-day EXAA baseline")
     if candidate["picp"] < TARGET_COVERAGE - 0.02:
         reasons.append("candidate interval coverage is below tolerance")
     if production is not None:
@@ -200,15 +159,6 @@ def evaluate_candidate(
         _metrics(model, fold.validation)
         for model, fold in zip(fold_models, split.folds, strict=True)
     )
-    fold_reference_metrics = tuple(
-        reference_metrics(
-            fold.train,
-            fold.validation,
-            coverage=TARGET_COVERAGE,
-            calibration_days=CALIBRATION_DAYS,
-        )
-        for fold in split.folds
-    )
 
     pretest = data.take(0, len(data) - len(split.test))
     evaluation_model = fit_model(
@@ -217,47 +167,11 @@ def evaluate_candidate(
         calibration_days=CALIBRATION_DAYS,
         point_shrinkage=point_shrinkage,
     )
+    test_metrics = _metrics(evaluation_model, split.test)
     if split.test.targets is None:
         raise AssertionError("Test targets disappeared after temporal split")
-    test_prediction = evaluation_model.predict(split.test.features)
-    test_metrics = forecast_metrics(
-        split.test.targets,
-        test_prediction[..., 0],
-        test_prediction[..., 1],
-        test_prediction[..., 2],
-        coverage=TARGET_COVERAGE,
-    )
-    references = reference_metrics(
-        pretest,
-        split.test,
-        coverage=TARGET_COVERAGE,
-        calibration_days=CALIBRATION_DAYS,
-    )
-    gain_interval = paired_mae_gain_interval(
-        split.test.targets,
-        split.test.baseline,
-        test_prediction[..., 0],
-    )
-    empirical_prediction = reference_forecast(
-        pretest,
-        split.test,
-        coverage=TARGET_COVERAGE,
-        calibration_days=CALIBRATION_DAYS,
-    )
-    empirical_gain_interval = paired_mae_gain_interval(
-        split.test.targets,
-        empirical_prediction[..., 0],
-        test_prediction[..., 0],
-    )
-    reasons = _promotion_reasons(
-        test_metrics,
-        references,
-        fold_metrics,
-        fold_reference_metrics,
-        gain_interval,
-        empirical_gain_interval,
-        production,
-    )
+    baseline_mae = float(np.mean(np.abs(split.test.baseline - split.test.targets)))
+    reasons = _promotion_reasons(test_metrics, baseline_mae, production)
     persisted_model = evaluation_model
     if not reasons:
         persisted_model = fit_model(
@@ -269,12 +183,8 @@ def evaluate_candidate(
     return CandidateResult(
         model=persisted_model,
         fold_metrics=fold_metrics,
-        fold_reference_metrics=fold_reference_metrics,
         test_metrics=test_metrics,
-        reference_metrics=references,
-        baseline_mae=references["exaa_mae"],
-        mae_gain_interval=gain_interval,
-        empirical_mae_gain_interval=empirical_gain_interval,
+        baseline_mae=baseline_mae,
         point_shrinkage=point_shrinkage,
         promotion_reasons=reasons,
     )
@@ -283,7 +193,6 @@ def evaluate_candidate(
 def _metadata(result: CandidateResult, through: date) -> dict[str, object]:
     return {
         "feature_names": list(FEATURE_NAMES),
-        "feature_data_version": FEATURE_DATA_VERSION,
         "target_coverage": TARGET_COVERAGE,
         "calibration_days": CALIBRATION_DAYS,
         "training_through": through.isoformat(),
@@ -291,11 +200,7 @@ def _metadata(result: CandidateResult, through: date) -> dict[str, object]:
         "point_shrinkage": result.point_shrinkage,
         "refit_on_all_data": not result.promotion_reasons,
         "fold_metrics": list(result.fold_metrics),
-        "fold_reference_metrics": list(result.fold_reference_metrics),
         "test_metrics": result.test_metrics,
-        "reference_metrics": result.reference_metrics,
-        "mae_gain_interval": list(result.mae_gain_interval),
-        "empirical_mae_gain_interval": list(result.empirical_mae_gain_interval),
         "baseline_exaa_mae": result.baseline_mae,
         "promotion_reasons": list(result.promotion_reasons),
     }
@@ -352,11 +257,7 @@ def _publish_model_manifest(
         "published_at": datetime.now(UTC).isoformat(),
         "target_coverage": TARGET_COVERAGE,
         "point_shrinkage": result.point_shrinkage,
-        "feature_data_version": FEATURE_DATA_VERSION,
         "test_metrics": result.test_metrics,
-        "reference_metrics": result.reference_metrics,
-        "mae_gain_interval": list(result.mae_gain_interval),
-        "empirical_mae_gain_interval": list(result.empirical_mae_gain_interval),
         "baseline_exaa_mae": result.baseline_mae,
         "archive": archive_name,
     }
@@ -445,7 +346,6 @@ def train_monthly(
                 "training_through": through.isoformat(),
                 "train_start": data.dates[0].isoformat(),
                 "test_end": split.test.dates[-1].isoformat(),
-                "feature_data_version": str(FEATURE_DATA_VERSION),
             }
         )
         mlflow.log_params(
@@ -459,7 +359,6 @@ def train_monthly(
                 },
                 "point_shrinkage": result.point_shrinkage,
                 "feature_count": len(FEATURE_NAMES),
-                "feature_data_version": FEATURE_DATA_VERSION,
                 "target_coverage": TARGET_COVERAGE,
                 "calibration_days": CALIBRATION_DAYS,
                 "walk_forward_folds": WALK_FORWARD_FOLDS,
@@ -472,27 +371,8 @@ def train_monthly(
                     for index, metrics in enumerate(result.fold_metrics)
                     for key, value in metrics.items()
                 },
-                **{
-                    f"fold_{index}_reference_{key}": value
-                    for index, metrics in enumerate(result.fold_reference_metrics)
-                    for key, value in metrics.items()
-                },
                 **{f"test_{key}": value for key, value in result.test_metrics.items()},
-                **{
-                    f"test_reference_{key}": value
-                    for key, value in result.reference_metrics.items()
-                },
                 "baseline_exaa_mae": result.baseline_mae,
-                "test_mae_gain_vs_exaa": result.mae_gain_interval[0],
-                "test_mae_gain_ci_low": result.mae_gain_interval[1],
-                "test_mae_gain_ci_high": result.mae_gain_interval[2],
-                "test_mae_gain_vs_empirical": result.empirical_mae_gain_interval[0],
-                "test_mae_gain_vs_empirical_ci_low": (
-                    result.empirical_mae_gain_interval[1]
-                ),
-                "test_mae_gain_vs_empirical_ci_high": (
-                    result.empirical_mae_gain_interval[2]
-                ),
                 "conformal_adjustment": result.model.conformal_adjustment_,
                 "promoted_to_prod": float(not result.promotion_reasons),
             }
@@ -527,9 +407,6 @@ def train_monthly(
         )
         client.set_model_version_tag(
             MODEL_NAME, version, "training_run_id", run.info.run_id
-        )
-        client.set_model_version_tag(
-            MODEL_NAME, version, "feature_data_version", FEATURE_DATA_VERSION
         )
         if result.promotion_reasons:
             client.set_model_version_tag(

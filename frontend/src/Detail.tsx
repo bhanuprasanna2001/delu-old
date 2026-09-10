@@ -32,13 +32,12 @@ export default function Detail({ day, forecast, points, features, featuresError,
     <section aria-label="Forecast performance">
       <SectionHeading number="01" title="Forecast performance"><span className="section-context">{metrics ? `Evaluated ${formatTimestamp(metrics.evaluated_at)}` : 'Waiting for data'}</span></SectionHeading>
       {metrics ? <>
-        {forecast.publication_status !== 'on_time' ? <p aria-live="polite" className="inline-note text-warning">{forecast.publication_status === 'late' ? 'This forecast was created after the 12:00 SDAC gate closure.' : 'This forecast was reconstructed outside its original auction window.'} Its daily errors remain available for audit, but it is excluded from rolling production-performance claims.</p> : null}
         <div className="metrics-grid">{metricDefinitions.map(item => <div className="metric" key={item.key} title={item.note}>
           <span className="metric-label">{item.label}</span><div className="metric-value">{item.percent ? percent(metrics[item.key]) : formatNumber(metrics[item.key])}</div>
           <span className="metric-unit">{item.percent ? `${percent(forecast.nominal_coverage).replace('.0%', '%')} target coverage` : 'EUR / MWh'}</span>
         </div>)}</div>
         <details className="metric-details"><summary>Definitions & rolling performance</summary><div className="mt-5 grid gap-x-12 gap-y-4 md:grid-cols-2 xl:grid-cols-3">{metricDefinitions.map(item => <p key={item.key}><strong>{item.label}.</strong> {item.note}</p>)}</div>
-          <div className="mt-5 border-t border-line pt-4">EXAA baseline MAE: <strong>{formatNumber(metrics.baseline_exaa_mae)} EUR/MWh</strong> · 7-day rolling MAE: <strong>{metrics.rolling_7d_mae == null ? 'Not available' : `${formatNumber(metrics.rolling_7d_mae)} EUR/MWh`}</strong> · 28-day rolling coverage: <strong>{metrics.rolling_28d_picp == null ? 'Not available' : percent(metrics.rolling_28d_picp)}</strong></div>
+          <div className="mt-5 border-t border-line pt-4">EXAA baseline MAE: <strong>{formatNumber(metrics.baseline_exaa_mae)} EUR/MWh</strong> · 7-day rolling MAE: <strong>{formatNumber(metrics.rolling_7d_mae)} EUR/MWh</strong> · 28-day rolling coverage: <strong>{percent(metrics.rolling_28d_picp)}</strong></div>
         </details>
         {metrics.monitoring_status === 'alert' && metrics.monitoring_reasons.length ? <p aria-live="polite" className="inline-note text-warning">Model monitoring: {metrics.monitoring_reasons.join(' · ')}</p> : null}
       </> : <div className="settlement-notice"><Clock3 size={20} className="shrink-0 text-muted" /><div><h3>{!day.has_forecast ? 'No forecast has been published for this day.' : day.settled ? 'Prices are settled. Evaluation is pending.' : 'Waiting for actual prices.'}</h3><p>{!day.has_forecast ? 'Market prices and inputs are available. Performance metrics appear when a forecast and actual prices are both available.' : 'The pipeline checks again automatically. Actual prices and evaluation results appear as the data becomes available.'}</p></div></div>}
@@ -59,8 +58,7 @@ export default function Detail({ day, forecast, points, features, featuresError,
           <h3>Built on the market. Calibrated for uncertainty.</h3>
           <p>EXAA-anchored gradient boosting with conformal prediction intervals.</p>
           {model.error && !model.data ? <DataError error={model.error} retry={() => void model.mutate()} /> : !model.data ? <Loading>Loading model details</Loading> : <>
-            <dl className="model-facts"><div><dt>Trained through</dt><dd>{formatDate(model.data.training_through, 'short')}</dd></div><div><dt>Target coverage</dt><dd>{percent(model.data.target_coverage)}</dd></div><div><dt>Holdout MAE</dt><dd>{formatNumber(model.data.test_metrics.mae)} EUR/MWh</dd></div><div><dt>EXAA holdout MAE</dt><dd>{formatNumber(model.data.baseline_exaa_mae)} EUR/MWh</dd></div><div><dt>Numerical MAE gain</dt><dd>{formatNumber(model.data.baseline_exaa_mae - model.data.test_metrics.mae)} EUR/MWh</dd></div><div><dt>Holdout coverage</dt><dd>{model.data.test_metrics.picp == null ? 'Not available' : percent(model.data.test_metrics.picp)}</dd></div></dl>
-            {model.data.mae_gain_interval && model.data.empirical_mae_gain_interval ? <p className="inline-note">Paired 95% intervals for the holdout MAE gain: {formatNumber(model.data.mae_gain_interval[1])} to {formatNumber(model.data.mae_gain_interval[2])} EUR/MWh versus EXAA, and {formatNumber(model.data.empirical_mae_gain_interval[1])} to {formatNumber(model.data.empirical_mae_gain_interval[2])} versus the empirical spread forecast. Promotion also requires stable rolling-fold wins and a better interval score.</p> : <p className="inline-note text-warning">Evidence note: this production version predates the rolling-fold stability, paired gain-interval, and empirical interval-baseline gates. Treat its holdout improvement as numerical, not as proven economic value.</p>}
+            <dl className="model-facts"><div><dt>Trained through</dt><dd>{formatDate(model.data.training_through, 'short')}</dd></div><div><dt>Target coverage</dt><dd>{percent(model.data.target_coverage)}</dd></div><div><dt>Holdout MAE</dt><dd>{formatNumber(model.data.test_metrics.mae)} EUR/MWh</dd></div><div><dt>Holdout coverage</dt><dd>{model.data.test_metrics.picp == null ? 'Not available' : percent(model.data.test_metrics.picp)}</dd></div></dl>
             {forecast && forecast.model_version !== model.data.version ? <p className="mb-4 text-xs">This day's forecast used v{forecast.model_version}. The download is the current production model, v{model.data.version}.</p> : null}
             <details className="metric-details mt-4"><summary>All holdout metrics</summary><dl className="model-facts">{Object.entries(model.data.test_metrics).map(([key, value]) => <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{key.includes('picp') || key.includes('coverage') ? percent(value) : formatNumber(value)}</dd></div>)}</dl></details>
             <div className="download-panel-footer"><DownloadButton href="/api/downloads/model.zip" filename={`delu-model-v${model.data.version}.zip`}>Download model <span className="file-type">ZIP</span></DownloadButton><span className="text-[10px] text-muted">Published {formatTimestamp(model.data.published_at)}</span></div>
@@ -79,7 +77,7 @@ export default function Detail({ day, forecast, points, features, featuresError,
 
     <section aria-label="Load and generation plots">
       <SectionHeading number="04" title="The fundamentals"><span className="section-context">{formatDate(day.delivery_date, 'short')} · Model inputs</span></SectionHeading>
-      <p className="section-description">Delivery-day ENTSO-E forecasts are shown only when DELU captured them before the 12:00 SDAC gate closure. They are research context, not version 2 model features. Measured values from two days earlier are model inputs.</p>
+      <p className="section-description">The forecast inputs come from the day before the selected date; measured values come from two days earlier. They show the information available to the model, rather than forecast accuracy for a single day.</p>
       {featuresError && !features ? <DataError error={featuresError} retry={retryFeatures} /> : !features ? <Loading>Loading fundamentals</Loading> : <Fundamentals features={features} />}
     </section>
 
@@ -102,13 +100,13 @@ const tables: Record<string, Column[]> = {
     { label: 'SDAC · one week earlier', key: 'price_de_lu_sdac_lag_7d_eur_per_mwh' },
   ],
   Load: [
-    { label: 'Captured before 12:00 · research', key: 'load_day_ahead_forecast_mw' }, { label: 'Actual · two days earlier · model input', key: 'load_actual_d_minus_2_mw' },
-    { label: 'Residual captured before 12:00 · research', key: 'residual_load_day_ahead_forecast_mw' }, { label: 'Residual actual · two days earlier · model input', key: 'residual_load_actual_d_minus_2_mw' },
+    { label: 'Forecast · previous day', key: 'load_day_ahead_forecast_mw' }, { label: 'Actual · two days earlier', key: 'load_actual_d_minus_2_mw' },
+    { label: 'Residual forecast · previous day', key: 'residual_load_day_ahead_forecast_mw' }, { label: 'Residual actual · two days earlier', key: 'residual_load_actual_d_minus_2_mw' },
   ],
   Generation: [
-    { label: 'Solar captured before 12:00 · research', key: 'solar_day_ahead_forecast_mw' }, { label: 'Solar actual · two days earlier · model input', key: 'solar_actual_d_minus_2_mw' },
-    { label: 'Onshore captured before 12:00 · research', key: 'wind_onshore_day_ahead_forecast_mw' }, { label: 'Onshore actual · two days earlier · model input', key: 'wind_onshore_actual_d_minus_2_mw' },
-    { label: 'Offshore captured before 12:00 · research', key: 'wind_offshore_day_ahead_forecast_mw' }, { label: 'Offshore actual · two days earlier · model input', key: 'wind_offshore_actual_d_minus_2_mw' },
+    { label: 'Solar forecast · previous day', key: 'solar_day_ahead_forecast_mw' }, { label: 'Solar actual · two days earlier', key: 'solar_actual_d_minus_2_mw' },
+    { label: 'Onshore forecast · previous day', key: 'wind_onshore_day_ahead_forecast_mw' }, { label: 'Onshore actual · two days earlier', key: 'wind_onshore_actual_d_minus_2_mw' },
+    { label: 'Offshore forecast · previous day', key: 'wind_offshore_day_ahead_forecast_mw' }, { label: 'Offshore actual · two days earlier', key: 'wind_offshore_actual_d_minus_2_mw' },
   ],
   Weather: [
     { label: 'Temperature at 2 m (°C)', key: 'temperature_2m_c' },
@@ -146,8 +144,8 @@ function InputTable({ features, points, weather }: { features: Features; points:
 }
 
 const inputSeries = [
-  { key: 'prior', label: 'D-2 actual · model input', color: colors.prior },
-  { key: 'forecast', label: 'Captured before 12:00 · research', color: colors.forecast, style: 'dashed' as const },
+  { key: 'prior', label: 'Actual from two days earlier', color: colors.prior },
+  { key: 'forecast', label: 'Forecast from previous day', color: colors.forecast, style: 'dashed' as const },
 ]
 const generationKeys = {
   'Wind + solar': ['solar', 'wind_onshore', 'wind_offshore'],
@@ -157,17 +155,13 @@ const generationKeys = {
 function Fundamentals({ features }: { features: Features }) {
   const [generation, setGeneration] = useState<keyof typeof generationKeys>('Wind + solar')
   const rows = features.rows.toSorted((a, b) => a.quarter_of_day - b.quarter_of_day)
-  const load = rows.map(row => ({ quarter: row.quarter_of_day, forecast: row.load_day_ahead_forecast_mw == null ? null : row.load_day_ahead_forecast_mw / 1000, prior: row.load_actual_d_minus_2_mw / 1000 }))
-  const renewable = rows.map(row => {
-    const forecastValues = generationKeys[generation].map(key => row[`${key}_day_ahead_forecast_mw`])
-    const completeForecast = forecastValues.every((value): value is number => value != null)
-    return {
-      quarter: row.quarter_of_day,
-      forecast: completeForecast ? forecastValues.reduce((sum, value) => sum + value, 0) / 1000 : null,
-      prior: generationKeys[generation].reduce((sum, key) => sum + row[`${key}_actual_d_minus_2_mw`], 0) / 1000,
-    }
-  })
-  return <div className="fundamentals-grid"><div className="fundamental-panel"><div className="fundamental-heading"><h3>Electricity load</h3><span className="text-[11px] text-muted">Germany</span></div><Chart points={load} series={inputSeries} unit="GW" label="Electricity load point-in-time context" /></div><div className="fundamental-panel"><div className="fundamental-heading"><h3>Renewable generation</h3><select aria-label="Generation source" value={generation} onChange={event => setGeneration(event.target.value as keyof typeof generationKeys)}>{Object.keys(generationKeys).map(key => <option key={key}>{key}</option>)}</select></div><Chart points={renewable} series={inputSeries} unit="GW" label={`${generation} generation point-in-time context`} /></div></div>
+  const load = rows.map(row => ({ quarter: row.quarter_of_day, forecast: row.load_day_ahead_forecast_mw / 1000, prior: row.load_actual_d_minus_2_mw / 1000 }))
+  const renewable = rows.map(row => ({
+    quarter: row.quarter_of_day,
+    forecast: generationKeys[generation].reduce((sum, key) => sum + row[`${key}_day_ahead_forecast_mw`], 0) / 1000,
+    prior: generationKeys[generation].reduce((sum, key) => sum + row[`${key}_actual_d_minus_2_mw`], 0) / 1000,
+  }))
+  return <div className="fundamentals-grid"><div className="fundamental-panel"><div className="fundamental-heading"><h3>Electricity load</h3><span className="text-[11px] text-muted">Germany</span></div><Chart points={load} series={inputSeries} unit="GW" label="Electricity load model inputs" /></div><div className="fundamental-panel"><div className="fundamental-heading"><h3>Renewable generation</h3><select aria-label="Generation source" value={generation} onChange={event => setGeneration(event.target.value as keyof typeof generationKeys)}>{Object.keys(generationKeys).map(key => <option key={key}>{key}</option>)}</select></div><Chart points={renewable} series={inputSeries} unit="GW" label={`${generation} generation model inputs`} /></div></div>
 }
 
 type WeatherMetric = keyof Omit<WeatherQuarter, 'quarter_of_day'>

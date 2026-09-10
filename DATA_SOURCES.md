@@ -18,20 +18,12 @@ DELU retrieves the following through the ENTSO-E REST API:
 | :--- | :--- | :--- |
 | SDAC auction prices | Germany-Luxembourg and Austria | Germany-Luxembourg prices are the evaluation target and supply 1-, 2-, and 7-day lag features; Austrian SDAC is retained in source history |
 | EXAA auction prices | Germany-Luxembourg and Austria | Delivery-day model inputs; Germany-Luxembourg EXAA is the model anchor and evaluation baseline |
-| Total load | Germany-Luxembourg | Delivery-day forecasts retained only when captured before the 12:00 cutoff; actual curves from two days earlier are model inputs |
-| Solar, onshore wind, offshore wind | Germany-Luxembourg | Delivery-day forecasts retained only when captured before the cutoff; actual curves from two days earlier are model inputs |
+| Total load | Germany-Luxembourg | Forecast curves from the previous delivery day and actual curves from two days earlier |
+| Solar, onshore wind, offshore wind | Germany-Luxembourg | Forecast and actual curves aligned with the load inputs |
 
 EXAA prices are fetched through ENTSO-E, not a separate EXAA API. Prices use
 EUR/MWh; load and generation use MW. DELU derives residual load by subtracting
 the three renewable generation series from total load.
-
-The point-in-time rule matters because ENTSO-E requires day-ahead total load by
-two hours before the market gate, while day-ahead wind and solar forecasts are due
-only by 18:00 Brussels time on `D-1`. Retrospectively fetched forecasts cannot
-prove that they were visible before SDAC. Version 2 therefore excludes these
-nullable research columns from the estimator until enough forward-captured history
-exists. See the official [load timing definition](https://transparencyplatform.zendesk.com/hc/en-us/articles/16647979768084-Total-Load-Day-Ahead-Actual-6-1-A-6-1-B)
-and [generation timing definition](https://transparencyplatform.zendesk.com/hc/en-us/articles/16648412255380-Generation-Forecast-Day-ahead-14-1-C-).
 
 ENTSO-E's [Legal Terms and Conditions](https://transparencyplatform.zendesk.com/hc/en-us/articles/40921911218961-Legal-Terms-and-Conditions)
 include its current free-reuse list. Listed datasets carry CC BY 4.0; use of
@@ -94,6 +86,4 @@ Missing data remains pending and is retried on subsequent pipeline runs.
 Weather is requested as soon as its selected model run can be retrieved; there
 is no Berlin morning release gate. Original published forecasts retain their
 values and actual creation timestamps. Once actual SDAC prices are complete,
-evaluation compares them with the stored forecast. Late and backfilled forecasts
-remain available for audit but are excluded from rolling production-performance
-claims.
+evaluation compares them with the stored forecast.

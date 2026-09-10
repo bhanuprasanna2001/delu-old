@@ -196,8 +196,7 @@ def _planned_requests(
         for requests_for_source, source_start, source_end in (
             (SDAC, start - timedelta(days=max(PRICE_LAGS)), end),
             (EXAA, start, end),
-            (FORECAST, start, end),
-            (WEATHER, start - timedelta(days=1), end - timedelta(days=1)),
+            (FORECAST + WEATHER, start - timedelta(days=1), end - timedelta(days=1)),
             (ACTUAL, start - timedelta(days=2), end - timedelta(days=2)),
         )
         for offset in range((source_end - source_start).days + 1)

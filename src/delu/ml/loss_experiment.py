@@ -18,7 +18,6 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 
 from delu.ml.data import DailyData, prepare_daily_data, walk_forward_split
 from delu.ml.model import POINT_CONFIG
-from delu.ml.training import paired_mae_gain_interval
 from delu.pipeline.gold import TABLE as GOLD_TABLE
 
 DEFAULT_THROUGH = date(2026, 8, 31)
@@ -203,13 +202,23 @@ def mae_gain_interval(
 ) -> tuple[float, float, float]:
     """Return mean MAE gain and a paired 95% bootstrap interval by day."""
     actual = np.asarray(actual_shift, dtype=np.float64)
-    return paired_mae_gain_interval(
-        actual,
-        np.zeros_like(actual),
-        np.asarray(predicted_shift, dtype=np.float64),
-        samples=samples,
-        seed=seed,
+    predicted = np.asarray(predicted_shift, dtype=np.float64)
+    if actual.shape != predicted.shape or actual.ndim != 2 or actual.size == 0:
+        raise ValueError("Bootstrap inputs must share a non-empty [day, quarter] shape")
+    if not np.isfinite(actual).all() or not np.isfinite(predicted).all():
+        raise ValueError("Bootstrap inputs must be finite")
+    if samples < 1:
+        raise ValueError("Bootstrap samples must be positive")
+
+    daily_gain = np.mean(
+        np.abs(actual) - np.abs(predicted - actual),
+        axis=1,
     )
+    rng = np.random.default_rng(seed)
+    indices = rng.integers(0, len(daily_gain), size=(samples, len(daily_gain)))
+    resampled_gain = daily_gain[indices].mean(axis=1)
+    low, high = np.quantile(resampled_gain, [0.025, 0.975])
+    return float(daily_gain.mean()), float(low), float(high)
 
 
 def run_experiment(data: DailyData) -> pd.DataFrame:

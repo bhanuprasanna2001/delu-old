@@ -16,7 +16,6 @@ def merge_delta(
     *,
     table: str,
     keys: tuple[str, ...],
-    evolve_schema: bool = False,
 ) -> None:
     """Create a Delta table or idempotently merge rows into it."""
     parts = table.split(".")
@@ -35,10 +34,9 @@ def merge_delta(
     view = f"_delu_updates_{uuid4().hex}"
     updates.createOrReplaceTempView(view)
     condition = " AND ".join(f"target.`{key}` <=> source.`{key}`" for key in keys)
-    merge = "MERGE WITH SCHEMA EVOLUTION" if evolve_schema else "MERGE"
     try:
         spark.sql(
-            f"""{merge} INTO {table} AS target
+            f"""MERGE INTO {table} AS target
             USING {view} AS source
             ON {condition}
             WHEN MATCHED THEN UPDATE SET *
