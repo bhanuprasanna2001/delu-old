@@ -21,7 +21,7 @@ export default function App() {
 
 function ForecastPage() {
   const [location, setLocation] = useState(readLocation)
-  const dates = useSWR('/api/dates?limit=2000', url => fetchData(url, datesSchema), { refreshInterval: 60_000 })
+  const dates = useSWR('/api/dates?limit=2000', url => fetchData(url, datesSchema), { refreshInterval: 15 * 60_000 })
   const defaultDate = dates.data?.find(day => day.has_forecast)?.delivery_date ?? dates.data?.[0]?.delivery_date
   const selectedDate = location.date || defaultDate
   const selectedDay = dates.data?.find(day => day.delivery_date === selectedDate)
@@ -72,7 +72,7 @@ function ForecastPage() {
 function DayView({ day, detail, onExpand }: { day: DateSummary; detail: boolean; onExpand: () => void }) {
   const date = day.delivery_date
   const forecast = useSWR(day.has_forecast ? `/api/forecasts/${date}` : null, url => fetchData(url, forecastSchema), {
-    refreshInterval: 60_000,
+    refreshInterval: latest => latest?.settled && latest.metrics ? 30 * 60_000 : 5 * 60_000,
   })
   const observations = useSWR(!day.has_forecast ? `/api/observations/${date}` : null, url => fetchData(url, observationsSchema))
   const features = useSWR(`/api/forecasts/${date}/features`, url => fetchData(url, featuresSchema))

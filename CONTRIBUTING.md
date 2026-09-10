@@ -222,7 +222,8 @@ With labeled Gold history available, `databricks bundle run -t prod monthly_trai
 trains and evaluates the initial model. A candidate must pass promotion checks to
 become `@prod` before scheduled forecasting can use it.
 
-The `data_pipeline` job runs every 30 minutes. It fetches missing source responses,
+The `data_pipeline` job runs at 02:30, 10:30, 11:30, and 13:30 Europe/Berlin in
+cost-efficient `STANDARD` performance mode. It fetches missing source responses,
 rebuilds complete Silver and Gold data, fills missing forecasts, and evaluates
 available actual prices. Missing or temporarily unavailable data stays pending for
 the next run; it has no expiry. To backfill a specific inclusive delivery range:
@@ -250,8 +251,9 @@ separate from this job's concurrency setting; see [processing and retries](MODEL
 Inspect a successful run's individual tasks and logs as well as its overall
 status. A successful run can still be waiting for unpublished source data.
 Validate availability with `/api/dates` and `/api/health`, then inspect a forecast
-and its evaluation on the website. Settled evaluations refresh each minute, so
-backfilled rolling metrics can update without reopening the page. Historical
+and its evaluation on the website. Pending results refresh every five minutes and
+settled evaluations every 30 minutes, so backfilled rolling metrics can update
+without reopening the page. Historical
 `late` metrics are recomputed by evaluation; the UI shows quality alerts once
 and does not display retired cutoff labels.
 

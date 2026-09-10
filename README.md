@@ -52,13 +52,14 @@ flowchart LR
     D --> A --> W
 ```
 
-Databricks prepares the data, trains the model, and stores forecasts. FastAPI reads
-those results; React displays them in the browser. On Render, the website and API
-run together in one service, with credentials kept on the server.
+Databricks prepares the data, trains the model, and stores forecasts. FastAPI
+caches successful reads; React displays them in the browser and reuses HTTP cache
+entries. On Render, the website and API run together in one service, with
+credentials kept on the server.
 
 | Scheduled job | Frequency | What it does |
 | :--- | :--- | :--- |
-| Data pipeline | Every 30 minutes | Fetches missing data, builds complete days, publishes missing forecasts, and evaluates available actual prices. |
+| Data pipeline | 02:30, 10:30, 11:30, and 13:30 Europe/Berlin | Fetches missing data, builds complete days, publishes missing forecasts, and evaluates available actual prices. |
 | Retraining | Monthly, day 3 at 06:00 Europe/Berlin | Evaluates a candidate model and promotes it if the quality checks pass. |
 
 Missing data stays pending. Each run retries the missing source responses across
@@ -69,9 +70,10 @@ the same way once its actual prices are available.
 If a scheduled run arrives while the pipeline is busy, Databricks queues it.
 One run writes the shared tables at a time. The next run checks the remaining
 gaps, so a delayed API response does not require a separate recovery workflow.
-The website refreshes forecasts and evaluation results every minute, including
-settled days whose rolling metrics change after a backfill. Publication time is
-shown as recorded; monitoring messages describe model quality only.
+The website checks for new dates every 15 minutes, refreshes pending results every
+five minutes, and refreshes settled results every 30 minutes. Recent successful
+reads remain available during a temporary SQL warehouse failure. Publication time
+is shown as recorded; monitoring messages describe model quality only.
 
 The model starts with the early EXAA auction price and learns a correction using
 boosted trees. Calibrated prediction intervals target 90% coverage. Results appear

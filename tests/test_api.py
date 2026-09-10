@@ -70,6 +70,9 @@ def test_forecast_endpoint_returns_complete_settled_day() -> None:
     assert payload["metrics"]["mae"] == 10.0
     assert len(payload["quarters"]) == 96
     assert payload["quarters"][0]["delivery_start_local"] == "2026-09-05T00:00:00"
+    assert response.headers["cache-control"] == (
+        "public, max-age=1800, s-maxage=3600, stale-if-error=604800"
+    )
 
 
 def test_forecast_endpoint_rejects_partial_grid() -> None:
@@ -138,6 +141,9 @@ def test_dates_include_observations_without_forecast_metadata() -> None:
     assert response.json()[0]["has_forecast"] is False
     assert response.json()[0]["predicted_at"] is None
     assert response.json()[0]["has_actual"] is True
+    assert response.headers["cache-control"] == (
+        "public, max-age=60, s-maxage=900, stale-if-error=604800"
+    )
 
 
 def test_observations_never_fabricate_forecasts() -> None:
@@ -227,6 +233,9 @@ def test_unsettled_forecast_does_not_show_metrics_or_truth() -> None:
     assert payload["settled"] is False
     assert payload["metrics"] is None
     assert payload["quarters"][0]["actual_price_eur_per_mwh"] is None
+    assert response.headers["cache-control"] == (
+        "public, max-age=300, s-maxage=300, stale-if-error=604800"
+    )
 
 
 def test_website_mount_preserves_api_and_missing_asset_responses(

@@ -167,7 +167,7 @@ test('forecast-only data refreshes into settlement without fabricating truth', a
   await expect(page.getByRole('button', { name: 'Actual SDAC', exact: true })).toHaveCount(0)
   await expect(page.getByText('Waiting for actual prices.')).toBeVisible()
   mode.settled = true
-  await page.clock.runFor(61_000)
+  await page.clock.runFor(5 * 60_000 + 1_000)
   await expect(page.getByText('Settled', { exact: true })).toBeVisible()
   await expect(page.getByText('Mean absolute error', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Actual SDAC', exact: true })).toBeVisible()
@@ -195,7 +195,7 @@ test('waiting data refreshes into a published forecast automatically', async ({ 
   await expect(page.getByText('Forecasts and results will appear as the data becomes available.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'DELU forecast', exact: true })).toHaveCount(0)
   mode.empty = false
-  await page.clock.runFor(61_000)
+  await page.clock.runFor(15 * 60_000 + 1_000)
   await expect(page.getByRole('button', { name: 'DELU forecast', exact: true })).toBeVisible()
   await expect(page.getByText('Waiting for data', { exact: true })).toHaveCount(0)
 })
@@ -217,7 +217,7 @@ test('settled evaluations refresh and show each quality alert once', async ({ pa
   await page.goto('/?date=2026-09-05&view=detail')
   await expect(page.getByText('Evaluated 05 Sept, 15:05 CEST', { exact: true })).toBeVisible()
   mode.metrics = { ...metrics, monitoring_status: 'alert', monitoring_reasons: ['seven-day model MAE is worse than the EXAA baseline'], evaluated_at: '2026-09-06T06:00:00Z' }
-  await page.clock.runFor(61_000)
+  await page.clock.runFor(31 * 60_000)
   await expect(page.getByText('Evaluated 06 Sept, 08:00 CEST', { exact: true })).toBeVisible()
   await page.getByText('Definitions & rolling performance', { exact: true }).click()
   await expect(page.getByText(/seven-day model MAE is worse than the EXAA baseline/)).toHaveCount(1)

@@ -64,10 +64,12 @@ rebuild the downstream state.
 
 ## Processing and retries
 
-The single `data_pipeline` job runs every 30 minutes in UTC, with one active run
-and native Databricks queueing enabled. A trigger arriving during an active run
-waits for capacity. Its steps are Bronze, Silver, Gold, prediction, and evaluation.
-Schedules are retry opportunities, not deadlines.
+The single `data_pipeline` job runs at 02:30, 10:30, 11:30, and 13:30 in
+Europe/Berlin, with one active run and native Databricks queueing enabled. These
+four starts cover overnight delays, forecast publication, a pre-settlement retry,
+and settlement work. This is a 92% reduction from 48 starts per day. Both scheduled
+jobs use the Databricks `STANDARD` performance target for cost-efficient serverless
+execution. The task graph, task retries, and backfill behavior are unchanged.
 
 The single-run limit serializes writes to the same Bronze, Silver, Gold, forecast,
 and metric tables. Raising it would let separate runs rebuild the same derived
@@ -211,6 +213,20 @@ date on first use), and checks all stored forecasts for missing evaluations.
 Backfilled predictions use the current production model and their real creation
 timestamps. They are not a replacement for chronological held-out model testing.
 There is no separate recovery job or age limit on missing data.
+
+## Public read caching
+
+Successful SQL results are cached in the FastAPI process for five minutes for
+health and forecasts, 15 minutes for the date index, and 12 hours for features,
+weather, and observations. An expired success can be served for up to seven days
+when Databricks is unavailable, and another refresh is delayed for five minutes
+after a failure. Failed reads are not cached when no prior success exists.
+
+API responses also advertise browser and shared-cache lifetimes. The website polls
+the date index every 15 minutes, pending forecasts every five minutes, and settled
+forecasts every 30 minutes. The server cache is intentionally process-local and is
+empty after a process restart; browser cache entries can still be reused according
+to their response headers.
 
 ## Code map
 

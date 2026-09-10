@@ -11,7 +11,7 @@ from typing import Annotated, Any, cast
 
 from databricks import sql
 from databricks.sdk.errors import DatabricksError
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, FiniteFloat
@@ -143,6 +143,18 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _cache_response(
+    response: Response,
+    *,
+    browser_seconds: int,
+    shared_seconds: int,
+) -> None:
+    response.headers["Cache-Control"] = (
+        f"public, max-age={browser_seconds}, s-maxage={shared_seconds}, "
+        "stale-if-error=604800"
+    )
+
+
 def _store(request: Request) -> SqlForecastStore:
     return cast(SqlForecastStore, request.app.state.store)
 
@@ -254,9 +266,11 @@ def create_app(
 
     @application.get("/api/dates", response_model=list[DateSummary])
     def dates(
+        response: Response,
         backend: StoreDependency,
         limit: LimitQuery = 366,
     ) -> list[DateSummary]:
+        _cache_response(response, browser_seconds=60, shared_seconds=900)
         return [
             DateSummary.model_validate(
                 {
@@ -272,12 +286,23 @@ def create_app(
     @application.get("/api/forecasts/{delivery_date}", response_model=ForecastDay)
     def forecast(
         delivery_date: date,
+        response: Response,
         backend: StoreDependency,
     ) -> ForecastDay:
-        return _forecast_response(delivery_date, backend.forecast(delivery_date))
+        result = _forecast_response(delivery_date, backend.forecast(delivery_date))
+        _cache_response(
+            response,
+            browser_seconds=300 if not result.settled else 1_800,
+            shared_seconds=300 if not result.settled else 3_600,
+        )
+        return result
 
     @application.get("/api/observations/{delivery_date}", response_model=ObservationDay)
-    def observations(delivery_date: date, backend: StoreDependency) -> ObservationDay:
+    def observations(
+        delivery_date: date,
+        response: Response,
+        backend: StoreDependency,
+    ) -> ObservationDay:
         rows = backend.observations(delivery_date)
         if not rows:
             raise HTTPException(status_code=404, detail="Market day not found")
@@ -285,6 +310,7 @@ def create_app(
             range(96)
         ):
             raise HTTPException(status_code=503, detail="Market day is incomplete")
+        _cache_response(response, browser_seconds=3_600, shared_seconds=43_200)
         return ObservationDay(
             delivery_date=delivery_date,
             quarters=[
@@ -303,6 +329,7 @@ def create_app(
     )
     def features(
         delivery_date: date,
+        response: Response,
         backend: StoreDependency,
     ) -> FeatureTable:
         rows = backend.features(delivery_date)
@@ -314,6 +341,7 @@ def create_app(
             or any(value is None for row in rows for value in row.values())
         ):
             raise HTTPException(status_code=503, detail="Gold features are incomplete")
+        _cache_response(response, browser_seconds=3_600, shared_seconds=43_200)
         for row in rows:
             row["delivery_start_local"] = _local_start(
                 delivery_date, int(row["quarter_of_day"])
@@ -321,7 +349,11 @@ def create_app(
         return FeatureTable(delivery_date=delivery_date, rows=rows)
 
     @application.get("/api/weather/{delivery_date}", response_model=WeatherDay)
-    def weather(delivery_date: date, backend: StoreDependency) -> WeatherDay:
+    def weather(
+        delivery_date: date,
+        response: Response,
+        backend: StoreDependency,
+    ) -> WeatherDay:
         rows = backend.weather(delivery_date)
         if not rows:
             raise HTTPException(status_code=404, detail="Weather inputs not found")
@@ -331,6 +363,7 @@ def create_app(
             or any(value is None for row in rows for value in row.values())
         ):
             raise HTTPException(status_code=503, detail="Weather inputs are incomplete")
+        _cache_response(response, browser_seconds=3_600, shared_seconds=43_200)
         return WeatherDay(
             delivery_date=delivery_date,
             model_run_date=delivery_date - timedelta(days=1),
@@ -348,11 +381,12 @@ def create_app(
         )
 
     @application.get("/api/model", response_model=ModelSummary)
-    def model(backend: StoreDependency) -> ModelSummary:
+    def model(response: Response, backend: StoreDependency) -> ModelSummary:
         try:
             info = backend.model_info()
         except ArtifactNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        _cache_response(response, browser_seconds=3_600, shared_seconds=3_600)
         info["download_url"] = "/api/downloads/model.zip"
         return ModelSummary.model_validate(info)
 
