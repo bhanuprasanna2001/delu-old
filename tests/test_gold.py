@@ -13,7 +13,12 @@ def test_cli_accepts_forwarded_backfill_parameters(monkeypatch) -> None:
     monkeypatch.setattr(gold, "build", build)
     monkeypatch.setattr(
         "sys.argv",
-        ["delu-gold", "--start=2026-09-01", "--end=2026-09-05"],
+        [
+            "delu-gold",
+            "--start=2026-09-01",
+            "--end=2026-09-05",
+            "--refresh=false",
+        ],
     )
 
     gold.main()

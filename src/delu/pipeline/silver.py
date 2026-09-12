@@ -140,6 +140,7 @@ def parse_payload(
     try:
         root = ET.fromstring(payload)
         intervals: dict[datetime, float] = {}
+        seen_time_series: set[tuple[str, tuple[tuple[datetime, float], ...]]] = set()
         found_time_series = False
         curve_types: set[str] = set()
 
@@ -159,6 +160,7 @@ def parse_payload(
             curve_type = _required_text(time_series, "curveType")
             curve_types.add(curve_type)
             found_period = False
+            time_series_intervals: dict[datetime, float] = {}
             for period in time_series.iter():
                 if _local_name(period.tag) != "Period":
                     continue
@@ -193,11 +195,20 @@ def parse_payload(
                     _expand_curve(points, interval_count, curve_type)
                 ):
                     timestamp = start + position * RESOLUTION
-                    if timestamp in intervals:
+                    if timestamp in time_series_intervals:
                         raise ValueError(f"Duplicate interval {timestamp.isoformat()}")
-                    intervals[timestamp] = value
+                    time_series_intervals[timestamp] = value
             if not found_period:
                 raise ValueError("TimeSeries contains no Period")
+
+            signature = curve_type, tuple(sorted(time_series_intervals.items()))
+            if signature in seen_time_series:
+                continue
+            seen_time_series.add(signature)
+            for timestamp, value in time_series_intervals.items():
+                if timestamp in intervals:
+                    raise ValueError(f"Duplicate interval {timestamp.isoformat()}")
+                intervals[timestamp] = value
 
         if not found_time_series:
             raise ValueError("Document contains no TimeSeries")
@@ -458,30 +469,38 @@ def _parse_rows(
 ) -> list[tuple[date, datetime, str, float, str, datetime]]:
     parsed = []
     for delivery_date, series, payload, ingested_at in rows:
-        if series.startswith(f"weather.{WEATHER_MODEL}."):
+        try:
+            if series.startswith(f"weather.{WEATHER_MODEL}."):
+                parsed.extend(
+                    (*row, ingested_at)
+                    for row in _parse_weather_payload(
+                        payload,
+                        delivery_date,
+                        series.rsplit(".", 1)[-1],
+                    )
+                )
+                continue
+            unit = "EUR/MWh" if series in PRICE_SERIES else "MW"
             parsed.extend(
-                (*row, ingested_at)
-                for row in _parse_weather_payload(
-                    payload,
+                (
                     delivery_date,
-                    series.rsplit(".", 1)[-1],
+                    delivery_start_utc,
+                    series,
+                    value,
+                    unit,
+                    ingested_at,
+                )
+                for delivery_start_utc, value in parse_payload(
+                    payload, series, delivery_date
                 )
             )
-            continue
-        unit = "EUR/MWh" if series in PRICE_SERIES else "MW"
-        parsed.extend(
-            (
-                delivery_date,
-                delivery_start_utc,
+        except IncompletePublication as exc:
+            LOGGER.warning(
+                "Skipping incomplete publication: %s on %s (%s)",
                 series,
-                value,
-                unit,
-                ingested_at,
+                delivery_date,
+                exc,
             )
-            for delivery_start_utc, value in parse_payload(
-                payload, series, delivery_date
-            )
-        )
     return parsed
 
 

@@ -520,6 +520,7 @@ def main() -> None:
     # Backfill bounds select work in Bronze, prediction, and evaluation.
     parser.add_argument("--start", help=argparse.SUPPRESS)
     parser.add_argument("--end", help=argparse.SUPPRESS)
+    parser.add_argument("--refresh", help=argparse.SUPPRESS)
     parser.add_argument(
         "--through",
         type=date.fromisoformat,
