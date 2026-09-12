@@ -152,6 +152,43 @@ class ParsePayloadTest(TestCase):
                 date(2026, 1, 1),
             )
 
+    def test_identical_duplicate_time_series_is_ignored(self) -> None:
+        document = payload(
+            "2025-12-31T23:00Z",
+            "2026-01-01T23:00Z",
+            points=((1, 1.0),),
+        )
+        start = document.index("  <TimeSeries>")
+        end = document.index("  </TimeSeries>") + len("  </TimeSeries>")
+        time_series = document[start:end]
+
+        intervals = parse_payload(
+            document[:end] + time_series + document[end:],
+            "de_lu.load.actual",
+            date(2026, 1, 1),
+        )
+
+        self.assertEqual(len(intervals), 96)
+
+    def test_conflicting_duplicate_time_series_is_invalid(self) -> None:
+        document = payload(
+            "2025-12-31T23:00Z",
+            "2026-01-01T23:00Z",
+            points=((1, 1.0),),
+        )
+        start = document.index("  <TimeSeries>")
+        end = document.index("  </TimeSeries>") + len("  </TimeSeries>")
+        conflicting = document[start:end].replace(
+            "<quantity>1.0</quantity>", "<quantity>2.0</quantity>"
+        )
+
+        with self.assertRaisesRegex(ValueError, "Duplicate interval"):
+            parse_payload(
+                document[:end] + conflicting + document[end:],
+                "de_lu.load.actual",
+                date(2026, 1, 1),
+            )
+
     def test_non_finite_entsoe_value_is_rejected_before_storage(self) -> None:
         with self.assertRaisesRegex(ValueError, "non-finite value"):
             validate_payload(
