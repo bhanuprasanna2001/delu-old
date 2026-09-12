@@ -469,30 +469,38 @@ def _parse_rows(
 ) -> list[tuple[date, datetime, str, float, str, datetime]]:
     parsed = []
     for delivery_date, series, payload, ingested_at in rows:
-        if series.startswith(f"weather.{WEATHER_MODEL}."):
+        try:
+            if series.startswith(f"weather.{WEATHER_MODEL}."):
+                parsed.extend(
+                    (*row, ingested_at)
+                    for row in _parse_weather_payload(
+                        payload,
+                        delivery_date,
+                        series.rsplit(".", 1)[-1],
+                    )
+                )
+                continue
+            unit = "EUR/MWh" if series in PRICE_SERIES else "MW"
             parsed.extend(
-                (*row, ingested_at)
-                for row in _parse_weather_payload(
-                    payload,
+                (
                     delivery_date,
-                    series.rsplit(".", 1)[-1],
+                    delivery_start_utc,
+                    series,
+                    value,
+                    unit,
+                    ingested_at,
+                )
+                for delivery_start_utc, value in parse_payload(
+                    payload, series, delivery_date
                 )
             )
-            continue
-        unit = "EUR/MWh" if series in PRICE_SERIES else "MW"
-        parsed.extend(
-            (
-                delivery_date,
-                delivery_start_utc,
+        except IncompletePublication as exc:
+            LOGGER.warning(
+                "Skipping incomplete publication: %s on %s (%s)",
                 series,
-                value,
-                unit,
-                ingested_at,
+                delivery_date,
+                exc,
             )
-            for delivery_start_utc, value in parse_payload(
-                payload, series, delivery_date
-            )
-        )
     return parsed
 
 

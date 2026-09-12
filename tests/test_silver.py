@@ -11,6 +11,7 @@ from delu.pipeline.bronze import (
     IncompletePublication,
 )
 from delu.pipeline.silver import (
+    _parse_rows,
     _parse_weather_payload,
     _weather_value,
     parse_payload,
@@ -200,6 +201,29 @@ class ParsePayloadTest(TestCase):
                 "de_lu.load.actual",
                 date(2026, 1, 1),
             )
+
+    def test_incomplete_legacy_publication_is_skipped(self) -> None:
+        ingested_at = datetime(2026, 1, 2, tzinfo=UTC)
+        incomplete = payload(
+            "2025-12-31T23:00Z",
+            "2026-01-01T11:00Z",
+            points=((1, 1.0),),
+        )
+        complete = payload(
+            "2025-12-31T23:00Z",
+            "2026-01-01T23:00Z",
+            points=((1, 2.0),),
+        )
+
+        rows = _parse_rows(
+            [
+                (date(2026, 1, 1), "de_lu.load.actual", incomplete, ingested_at),
+                (date(2026, 1, 1), "de_lu.load.forecast", complete, ingested_at),
+            ]
+        )
+
+        self.assertEqual(len(rows), 96)
+        self.assertEqual({row[2] for row in rows}, {"de_lu.load.forecast"})
 
 
 @pytest.mark.parametrize(
