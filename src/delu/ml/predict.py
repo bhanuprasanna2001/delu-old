@@ -245,6 +245,7 @@ def main() -> None:
     parser.add_argument("--delivery-date", type=date.fromisoformat)
     parser.add_argument("--start", help="First delivery date to backfill")
     parser.add_argument("--end", help="Last delivery date; defaults to tomorrow")
+    parser.add_argument("--refresh", help=argparse.SUPPRESS)
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
