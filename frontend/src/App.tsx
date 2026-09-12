@@ -93,7 +93,7 @@ function DayView({ day, detail, onExpand }: { day: DateSummary; detail: boolean;
     </div>
     {result.error && !result.data ? <DataError error={result.error} retry={() => void result.mutate()} /> : !result.data ? <Loading /> : <Chart points={points} series={series} unit="EUR / MWh" label={`Electricity prices for ${date}`} onInspect={!detail ? onExpand : undefined} />}
     <div className="price-panel-footer">
-      <span>{!day.has_forecast ? 'Observed prices · No stored model forecast' : forecast.data ? `Published ${formatTimestamp(forecast.data.predicted_at)}` : 'Loading publication time'}</span>
+      <span>{!day.has_forecast ? 'Observed prices · No stored model forecast' : forecast.data ? `${forecast.data.forecast_kind === 'operational' ? 'Operational forecast · Published' : 'Retrospective forecast · Generated'} ${formatTimestamp(forecast.data.predicted_at)}` : 'Loading publication time'}</span>
       {detail ? <span>Europe/Berlin</span> : <button type="button" className="explore-button" onClick={onExpand} onPointerEnter={() => void import('./Detail')}>Explore this day <ArrowDownRight size={13} /></button>}
     </div>
     {features.error && !features.data && day.has_forecast ? <div className="inline-note" aria-live="polite">EXAA inputs are unavailable. <button onClick={() => void features.mutate()} className="underline underline-offset-2">Retry inputs</button></div> : null}

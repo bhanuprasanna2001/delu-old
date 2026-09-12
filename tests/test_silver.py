@@ -5,7 +5,11 @@ from unittest import TestCase
 
 import pytest
 
-from delu.pipeline.bronze import WEATHER_FIELDS, WEATHER_LOCATIONS
+from delu.pipeline.bronze import (
+    WEATHER_FIELDS,
+    WEATHER_LOCATIONS,
+    IncompletePublication,
+)
 from delu.pipeline.silver import (
     _parse_weather_payload,
     _weather_value,
@@ -101,20 +105,19 @@ class ParsePayloadTest(TestCase):
         self.assertEqual(len(autumn), 100)
         self.assertTrue(all(value is not None for _, value in spring + autumn))
 
-    def test_a03_fills_a_leading_dst_gap(self) -> None:
-        intervals = parse_payload(
-            payload(
-                "2025-10-25T23:00Z",
-                "2025-10-26T23:00Z",
-                points=((1, 1.0),),
-            ),
-            "de_lu.generation.solar.forecast",
-            date(2025, 10, 26),
-        )
-
-        self.assertEqual(len(intervals), 100)
-        self.assertEqual(intervals[0][0].isoformat(), "2025-10-25T22:00:00+00:00")
-        self.assertTrue(all(value == 1.0 for _, value in intervals))
+    def test_a03_does_not_fill_outside_its_period(self) -> None:
+        with self.assertRaisesRegex(
+            IncompletePublication, "Expected 100 delivery intervals"
+        ):
+            parse_payload(
+                payload(
+                    "2025-10-25T23:00Z",
+                    "2025-10-26T23:00Z",
+                    points=((1, 1.0),),
+                ),
+                "de_lu.generation.wind_offshore.forecast",
+                date(2025, 10, 26),
+            )
 
     def test_a03_requires_a_value_for_the_first_interval(self) -> None:
         with self.assertRaisesRegex(ValueError, "A03 curve must start at position 1"):
@@ -124,6 +127,27 @@ class ParsePayloadTest(TestCase):
                     "2026-01-01T23:00Z",
                     points=((2, 10.0),),
                 ),
+                "de_lu.load.actual",
+                date(2026, 1, 1),
+            )
+
+    def test_structurally_empty_document_is_invalid(self) -> None:
+        with self.assertRaisesRegex(ValueError, "contains no TimeSeries"):
+            parse_payload("<root/>", "de_lu.load.actual", date(2026, 1, 1))
+
+    def test_duplicate_period_interval_is_invalid(self) -> None:
+        document = payload(
+            "2025-12-31T23:00Z",
+            "2026-01-01T23:00Z",
+            points=((1, 1.0),),
+        )
+        start = document.index("    <Period>")
+        end = document.index("    </Period>") + len("    </Period>")
+        period = document[start:end]
+
+        with self.assertRaisesRegex(ValueError, "Duplicate interval"):
+            parse_payload(
+                document[:end] + period + document[end:],
                 "de_lu.load.actual",
                 date(2026, 1, 1),
             )
@@ -139,6 +163,40 @@ class ParsePayloadTest(TestCase):
                 "de_lu.load.actual",
                 date(2026, 1, 1),
             )
+
+
+@pytest.mark.parametrize(
+    ("series", "positions"),
+    [
+        pytest.param(
+            "de_lu.generation.solar.forecast",
+            (1, *range(28, 75), 77),
+            id="solar-sparse-a03",
+        ),
+        pytest.param(
+            "de_lu.generation.wind_onshore.forecast",
+            tuple(range(1, 97)),
+            id="onshore-complete-a03",
+        ),
+    ],
+)
+def test_verified_autumn_forecasts_preserve_their_published_96_intervals(
+    series: str,
+    positions: tuple[int, ...],
+) -> None:
+    intervals = parse_payload(
+        payload(
+            "2025-10-25T23:00Z",
+            "2025-10-26T23:00Z",
+            points=tuple((position, float(position)) for position in positions),
+        ),
+        series,
+        date(2025, 10, 26),
+    )
+
+    assert len(intervals) == 96
+    assert intervals[0][0] == datetime(2025, 10, 25, 23, tzinfo=UTC)
+    assert intervals[-1][1] == float(positions[-1])
 
 
 def test_weather_uses_temperature_fallback_and_keeps_only_next_day() -> None:
@@ -233,6 +291,12 @@ def test_weather_uses_temperature_fallback_and_keeps_only_next_day() -> None:
         row for row in rows if row[2] == "weather.north_sea_west.temperature_2m"
     )
     assert temperature[3] == 122.0
+    radiation = [
+        row for row in rows if row[2] == "weather.north_sea_west.shortwave_radiation"
+    ]
+    assert len(radiation) == 24
+    assert radiation[0][1] == datetime(2026, 6, 23, 22, tzinfo=UTC)
+    assert radiation[0][3] == 23.0
 
 
 def test_weather_repairs_only_the_known_null_shapes() -> None:
@@ -242,5 +306,5 @@ def test_weather_repairs_only_the_known_null_shapes() -> None:
     assert (
         _weather_value("shortwave_radiation", None, None, run_start, run_start) == 0.0
     )
-    with pytest.raises(ValueError, match="unexpected null"):
+    with pytest.raises(IncompletePublication, match="not fully published"):
         _weather_value("cloud_cover", None, None, run_start, run_start)

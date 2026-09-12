@@ -19,12 +19,16 @@ export const datesSchema = z.array(z.object({
 const metricsSchema = z.object({
   mae: number, rmse: number, bias: number, picp: number, mpiw: number,
   interval_score: number, baseline_exaa_mae: number, baseline_7d_mae: number,
-  rolling_7d_mae: number, rolling_7d_baseline_exaa_mae: number, rolling_28d_picp: number,
+  normalized_96_mae: number, normalized_96_rmse: number, normalized_96_bias: number,
+  normalized_96_picp: number, normalized_96_mpiw: number, normalized_96_interval_score: number,
+  normalized_96_baseline_exaa_mae: number, normalized_96_baseline_7d_mae: number,
+  rolling_7d_mae: number.nullable(), rolling_7d_baseline_exaa_mae: number.nullable(), rolling_28d_picp: number.nullable(),
   monitoring_status: z.string(), monitoring_reasons: z.array(z.string()), evaluated_at: z.string(),
 })
 
 export const forecastSchema = z.object({
   delivery_date: dateSchema, model_version: z.string(), predicted_at: z.string(),
+  forecast_kind: z.enum(['operational', 'retrospective']),
   nominal_coverage: number.min(0).max(1), settled: z.boolean(), metrics: metricsSchema.nullable(),
   quarters: grid(z.object({
     quarter_of_day: quarter,
@@ -51,11 +55,11 @@ export const featuresSchema = z.object({
     price_de_lu_sdac_lag_1d_eur_per_mwh: number,
     price_de_lu_sdac_lag_2d_eur_per_mwh: number,
     price_de_lu_sdac_lag_7d_eur_per_mwh: number,
-    load_day_ahead_forecast_mw: number, load_actual_d_minus_2_mw: number,
-    solar_day_ahead_forecast_mw: number, solar_actual_d_minus_2_mw: number,
-    wind_onshore_day_ahead_forecast_mw: number, wind_onshore_actual_d_minus_2_mw: number,
-    wind_offshore_day_ahead_forecast_mw: number, wind_offshore_actual_d_minus_2_mw: number,
-    residual_load_day_ahead_forecast_mw: number, residual_load_actual_d_minus_2_mw: number,
+    load_forecast_delivery_d_minus_1_mw: number, load_actual_d_minus_2_mw: number,
+    solar_forecast_delivery_d_minus_1_mw: number, solar_actual_d_minus_2_mw: number,
+    wind_onshore_forecast_delivery_d_minus_1_mw: number, wind_onshore_actual_d_minus_2_mw: number,
+    wind_offshore_forecast_delivery_d_minus_1_mw: number, wind_offshore_actual_d_minus_2_mw: number,
+    residual_load_forecast_delivery_d_minus_1_mw: number, residual_load_actual_d_minus_2_mw: number,
     day_of_week: z.number().int(), month: z.number().int(), season: z.string(),
     is_weekend: z.boolean(), is_holiday_de_nationwide: z.boolean(), is_holiday_lu: z.boolean(),
   })),

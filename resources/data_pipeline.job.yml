@@ -16,6 +16,8 @@ resources:
           default: ""
         - name: end
           default: ""
+        - name: refresh
+          default: "false"
       email_notifications:
         on_failure:
           - ${workspace.current_user.userName}
@@ -32,7 +34,7 @@ resources:
           python_wheel_task:
             package_name: delu
             entry_point: delu-bronze
-            parameters: ["--start", "{{job.parameters.start}}", "--end", "{{job.parameters.end}}"]
+            parameters: ["--start", "{{job.parameters.start}}", "--end", "{{job.parameters.end}}", "--refresh", "{{job.parameters.refresh}}"]
         - task_key: silver
           depends_on:
             - task_key: bronze
@@ -73,4 +75,4 @@ resources:
           python_wheel_task:
             package_name: delu
             entry_point: delu-evaluate
-            parameters: ["--start", "{{job.parameters.start}}", "--end", "{{job.parameters.end}}"]
+            parameters: ["--start", "{{job.parameters.start}}", "--end", "{{job.parameters.end}}", "--refresh", "{{job.parameters.refresh}}"]

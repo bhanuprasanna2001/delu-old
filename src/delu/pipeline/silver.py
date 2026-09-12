@@ -29,6 +29,7 @@ from delu.pipeline.bronze import (
     WEATHER_FIELDS,
     WEATHER_LOCATIONS,
     WEATHER_MODEL,
+    IncompletePublication,
 )
 from delu.pipeline.bronze import TABLE as BRONZE_TABLE
 
@@ -36,6 +37,13 @@ TABLE = "delu.silver.measurements"
 RESOLUTION = timedelta(minutes=15)
 KNOWN_SERIES = frozenset(request[0] for request in ALL)
 PRICE_SERIES = frozenset(request[0] for request in SDAC + EXAA)
+KNOWN_AUTUMN_96_SERIES = frozenset(
+    {
+        "de_lu.generation.solar.forecast",
+        "de_lu.generation.wind_onshore.forecast",
+    }
+)
+# Verified in Bronze on 2025-10-26: both A03 Periods ran 23:00Z to 23:00Z.
 LOGGER = logging.getLogger(__name__)
 SILVER_SCHEMA = StructType(
     [
@@ -87,7 +95,9 @@ def _expand_curve(
 
     if curve_type == "A01":
         if any(value is None for value in values):
-            raise ValueError("A01 curve must contain every interval position")
+            raise IncompletePublication(
+                "A01 curve must contain every interval position"
+            )
     elif curve_type == "A03":
         if not values or values[0] is None:
             raise ValueError("A03 curve must start at position 1")
@@ -110,7 +120,7 @@ def parse_payload(
     series: str,
     delivery_date: date,
 ) -> list[tuple[datetime, float]]:
-    """Parse one raw ENTSO-E response into complete 15-minute UTC intervals."""
+    """Parse one raw ENTSO-E response into validated 15-minute UTC intervals."""
     if series not in KNOWN_SERIES:
         raise ValueError(f"Unknown series {series!r}")
     if not payload or not payload.strip():
@@ -130,11 +140,13 @@ def parse_payload(
     try:
         root = ET.fromstring(payload)
         intervals: dict[datetime, float] = {}
-        curve_type: str | None = None
+        found_time_series = False
+        curve_types: set[str] = set()
 
         for time_series in root.iter():
             if _local_name(time_series.tag) != "TimeSeries":
                 continue
+            found_time_series = True
 
             unit = _required_text(time_series, unit_tag)
             if unit != expected_unit:
@@ -145,9 +157,12 @@ def parse_payload(
                     raise ValueError(f"Expected currency 'EUR', found {currency!r}")
 
             curve_type = _required_text(time_series, "curveType")
+            curve_types.add(curve_type)
+            found_period = False
             for period in time_series.iter():
                 if _local_name(period.tag) != "Period":
                     continue
+                found_period = True
 
                 start = _utc_datetime(_required_text(period, "start"))
                 end = _utc_datetime(_required_text(period, "end"))
@@ -178,31 +193,39 @@ def parse_payload(
                     _expand_curve(points, interval_count, curve_type)
                 ):
                     timestamp = start + position * RESOLUTION
-                    previous = intervals.get(timestamp)
-                    if previous is not None and previous != value:
-                        raise ValueError(
-                            f"Conflicting values for interval {timestamp.isoformat()}"
-                        )
+                    if timestamp in intervals:
+                        raise ValueError(f"Duplicate interval {timestamp.isoformat()}")
                     intervals[timestamp] = value
+            if not found_period:
+                raise ValueError("TimeSeries contains no Period")
+
+        if not found_time_series:
+            raise ValueError("Document contains no TimeSeries")
 
         expected_count = int((day_end - day_start) // RESOLUTION)
         expected = [day_start + offset * RESOLUTION for offset in range(expected_count)]
-        if curve_type == "A03" and intervals:
-            first = min(intervals)
-            for offset in range(int((first - day_start) // RESOLUTION)):
-                intervals[day_start + offset * RESOLUTION] = intervals[first]
-
-            last = max(intervals)
-            for offset in range(1, int((day_end - last) // RESOLUTION)):
-                intervals[last + offset * RESOLUTION] = intervals[last]
         missing = set(expected).difference(intervals)
         extra = set(intervals).difference(expected)
-        if missing or extra:
-            raise ValueError(
+        if extra:
+            raise ValueError(f"Found {len(extra)} intervals outside the delivery date")
+        known_autumn_gap = (
+            series in KNOWN_AUTUMN_96_SERIES
+            and expected_count == 100
+            and curve_types == {"A03"}
+            and set(intervals) == set(expected[4:])
+        )
+        if missing and not known_autumn_gap:
+            raise IncompletePublication(
                 f"Expected {expected_count} delivery intervals, found {len(intervals)} "
-                f"({len(missing)} missing, {len(extra)} outside the delivery date)"
+                f"({len(missing)} missing)"
             )
-        return [(timestamp, intervals[timestamp]) for timestamp in expected]
+        return [
+            (timestamp, intervals[timestamp])
+            for timestamp in expected
+            if timestamp in intervals
+        ]
+    except IncompletePublication:
+        raise
     except (ET.ParseError, TypeError, ValueError) as exc:
         raise ValueError(
             f"Could not parse {series} for {delivery_date}: {exc}"
@@ -221,6 +244,8 @@ def _weather_value(
         value = fallback
     if value is None and field == "shortwave_radiation" and valid_time == run_start:
         value = 0.0
+    if value is None:
+        raise IncompletePublication(f"Weather {field} is not fully published")
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ValueError(f"Weather {field} contains an unexpected null or value")
     result = float(value)
@@ -230,8 +255,12 @@ def _weather_value(
 
 
 def _weather_times(raw: object, run_start: datetime) -> list[datetime]:
-    if not isinstance(raw, list) or len(raw) != 48:
-        raise ValueError("Weather response must contain 48 hourly timestamps")
+    if not isinstance(raw, list):
+        raise ValueError("Weather timestamps must be a list")
+    if len(raw) != 48:
+        raise IncompletePublication(
+            f"Weather response contains {len(raw)} of 48 hourly timestamps"
+        )
     try:
         values = [datetime.fromisoformat(value) for value in raw]
     except (TypeError, ValueError) as exc:
@@ -376,22 +405,29 @@ def _parse_weather_payload(
                     zip(valid_times, primary, strict=True)
                 )
             ]
+            represented_times = (
+                [value - timedelta(hours=1) for value in valid_times]
+                if field == "shortwave_radiation"
+                else valid_times
+            )
             rows.extend(
                 (
                     delivery_date,
-                    valid_time,
+                    represented_time,
                     f"weather.{location_id}.{field}",
                     value,
                     unit,
                 )
-                for valid_time, value in zip(valid_times, values, strict=True)
-                if valid_time.astimezone(BERLIN).date() == delivery_date
+                for represented_time, value in zip(
+                    represented_times, values, strict=True
+                )
+                if represented_time.astimezone(BERLIN).date() == delivery_date
             )
     return rows
 
 
 def validate_payload(payload: str, series: str, source_date: date) -> None:
-    """Reject an incomplete or non-finite source response before Bronze stores it."""
+    """Reject an unusable or non-finite response before Bronze stores it."""
     if series.startswith(f"weather.{WEATHER_MODEL}."):
         _parse_weather_payload(payload, source_date, series.rsplit(".", 1)[-1])
         return

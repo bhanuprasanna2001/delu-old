@@ -46,6 +46,7 @@ class BoostingConfig:
 
 POINT_CONFIG = BoostingConfig()
 INTERVAL_CONFIG = BoostingConfig(max_leaf_nodes=7)
+MODEL_DATA_VERSION = 2
 
 
 def conformal_adjustment(
@@ -87,6 +88,7 @@ class ConformalPriceForecaster(BaseEstimator):
         coverage: float = 0.9,
         calibration_days: int = 28,
         point_shrinkage: float = 1.0,
+        model_data_version: int = MODEL_DATA_VERSION,
         point_config: BoostingConfig = POINT_CONFIG,
         interval_config: BoostingConfig = INTERVAL_CONFIG,
     ) -> None:
@@ -96,6 +98,7 @@ class ConformalPriceForecaster(BaseEstimator):
         self.coverage = coverage
         self.calibration_days = calibration_days
         self.point_shrinkage = point_shrinkage
+        self.model_data_version = model_data_version
         self.point_config = point_config
         self.interval_config = interval_config
 

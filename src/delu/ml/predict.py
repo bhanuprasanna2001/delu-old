@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import mlflow
 import mlflow.sklearn
@@ -16,7 +16,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 from delu.ml.data import prepare_daily_data
-from delu.ml.model import ConformalPriceForecaster
+from delu.ml.model import MODEL_DATA_VERSION, ConformalPriceForecaster
 from delu.ml.tables import merge_delta
 from delu.ml.train import MODEL_NAME, TARGET_COVERAGE
 from delu.pipeline.bronze import BERLIN
@@ -24,7 +24,17 @@ from delu.pipeline.gold import TABLE as GOLD_TABLE
 
 FORECAST_TABLE = "delu.gold.forecasts"
 FORECAST_RUN_TABLE = "delu.gold.forecast_runs"
+OPERATIONAL_CUTOFF = time(12)
 LOGGER = logging.getLogger(__name__)
+
+
+def _forecast_kind(delivery_date: date, predicted_at: datetime) -> str:
+    if predicted_at.tzinfo is None:
+        predicted_at = predicted_at.replace(tzinfo=UTC)
+    cutoff = datetime.combine(
+        delivery_date - timedelta(days=1), OPERATIONAL_CUTOFF, BERLIN
+    )
+    return "operational" if predicted_at <= cutoff else "retrospective"
 
 
 def _drift_values(
@@ -46,8 +56,7 @@ def forecast_day(
     now: datetime | None = None,
 ) -> str | None:
     """Publish a missing day, or leave it pending until complete inputs arrive."""
-    current = datetime.now(UTC) if now is None else now
-    if current.tzinfo is None or current.utcoffset() is None:
+    if now is not None and (now.tzinfo is None or now.utcoffset() is None):
         raise ValueError("now must be timezone-aware")
 
     spark = (
@@ -86,6 +95,11 @@ def forecast_day(
     model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}/{version.version}")
     if not isinstance(model, ConformalPriceForecaster):
         raise TypeError("The production model has an incompatible Python type")
+    if getattr(model, "model_data_version", None) != MODEL_DATA_VERSION:
+        raise ValueError(
+            f"The production model must be retrained on model data version "
+            f"{MODEL_DATA_VERSION}"
+        )
     prediction = model.predict(daily.features)[0]
     if not np.isfinite(prediction).all() or np.any(prediction[:, 1] > prediction[:, 2]):
         raise ValueError("The production model returned invalid prediction intervals")
@@ -93,8 +107,13 @@ def forecast_day(
     outlier_rate, max_feature_mean_z, prediction_mean_z = _drift_values(
         model, daily.features, prediction[:, 0]
     )
-    published_at = current if now is not None else datetime.now(UTC)
-    predicted_at = published_at.astimezone(UTC).replace(tzinfo=None)
+    history = spark.sql(f"DESCRIBE HISTORY {GOLD_TABLE} LIMIT 1").first()
+    if history is None:
+        raise RuntimeError(f"Could not resolve a Delta version for {GOLD_TABLE}")
+    gold_version = history.version
+    current = datetime.now(UTC) if now is None else now
+    forecast_kind = _forecast_kind(delivery_date, current)
+    predicted_at = current.astimezone(UTC).replace(tzinfo=None)
     sorted_gold = gold.sort_values("quarter_of_day")
     forecast = pd.DataFrame(
         {
@@ -107,6 +126,7 @@ def forecast_day(
             "nominal_coverage": TARGET_COVERAGE,
             "model_version": version.version,
             "predicted_at": predicted_at,
+            "forecast_kind": forecast_kind,
         }
     )
     run = pd.DataFrame(
@@ -115,6 +135,9 @@ def forecast_day(
                 "delivery_date": delivery_date,
                 "model_version": version.version,
                 "predicted_at": predicted_at,
+                "forecast_kind": forecast_kind,
+                "model_data_version": MODEL_DATA_VERSION,
+                "gold_table_version": gold_version,
                 "data_outlier_rate": outlier_rate,
                 "max_feature_mean_z": max_feature_mean_z,
                 "prediction_mean_z": prediction_mean_z,
@@ -147,11 +170,20 @@ def forecast_pending(
     *,
     start: date | None = None,
     end: date | None = None,
+    now: datetime | None = None,
 ) -> None:
     """Fill missing days from the beginning of published forecast history."""
-    end = end or datetime.now(UTC).astimezone(BERLIN).date() + timedelta(days=1)
+    current = datetime.now(UTC) if now is None else now
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    scheduled = start is None and end is None
+    end = end or current.astimezone(BERLIN).date() + timedelta(days=1)
     if not spark.catalog.tableExists(GOLD_TABLE):
         LOGGER.info("Waiting for model inputs.")
+        if scheduled:
+            _require_operational_forecast(
+                spark, datetime.now(UTC) if now is None else now
+            )
         return
     ready = (
         spark.table(GOLD_TABLE)
@@ -177,10 +209,35 @@ def forecast_pending(
         raise ValueError("forecast start cannot be after end")
     for row in (
         ready.where(F.col("delivery_date").between(start, end))
-        .orderBy("delivery_date")
+        .orderBy(F.col("delivery_date").desc())
         .collect()
     ):
-        forecast_day(row.delivery_date, spark=spark)
+        forecast_day(row.delivery_date, spark=spark, now=now)
+    if scheduled:
+        _require_operational_forecast(spark, datetime.now(UTC) if now is None else now)
+
+
+def _require_operational_forecast(spark: SparkSession, now: datetime) -> None:
+    local = now.astimezone(BERLIN)
+    if local.time() < OPERATIONAL_CUTOFF:
+        return
+    delivery_date = local.date() + timedelta(days=1)
+    ready = 0
+    if spark.catalog.tableExists(FORECAST_RUN_TABLE):
+        ready = (
+            spark.table(FORECAST_RUN_TABLE)
+            .where(
+                (F.col("delivery_date") == F.lit(delivery_date))
+                & (F.col("forecast_kind") == "operational")
+            )
+            .limit(1)
+            .count()
+        )
+    if not ready:
+        raise RuntimeError(
+            f"No operational forecast exists for {delivery_date} after the "
+            f"{OPERATIONAL_CUTOFF.isoformat(timespec='minutes')} cutoff"
+        )
 
 
 def main() -> None:

@@ -42,7 +42,8 @@ specific `D-1` 00:00 UTC run for delivery day `D`.
 - Fields are temperature at 2 m, wind speed and direction at 100 m, shortwave
   radiation, and cloud cover.
 - `ecmwf_ifs025` from the same run fills a missing primary temperature only.
-- DELU keeps the hours valid on the delivery day, expands them into quarter-hour
+- DELU aligns shortwave radiation to the start of the preceding hour it represents,
+  keeps the hours represented on the delivery day, expands them into quarter-hour
   features, and uses every location separately in the model.
 - Website weather charts and table columns show unweighted arithmetic means
   across all 25 locations. Wind direction remains an individual model input;
@@ -64,16 +65,25 @@ Its [FAQ](https://www.openholidaysapi.org/en/faq/) describes the data origins an
 licensing.
 
 DELU uses nationwide German public holidays and Luxembourg public holidays.
-Holiday date ranges become daily flags in Gold. Weekday, weekend, month, season,
-and quarter-hour fields are calculated locally using the Europe/Berlin calendar.
+Validated daily flags, including non-holidays, are cached in Silver and joined by
+Gold. Weekday, weekend, month, season, and quarter-hour fields are calculated
+locally using the Europe/Berlin calendar.
 
 ## DELU transformations and outputs
 
-Source responses are validated and preserved in Bronze. Silver parses the raw
-responses. Gold aligns dates and creates a fixed 96-quarter local-day grid. On
-daylight-saving transitions, repeated wall-clock quarters are averaged and
-missing clock positions are filled from adjacent values. This normalization
-is distinct from the physical market's 92- or 100-interval transition days.
+Source responses are validated and preserved in Bronze. A03 curves are expanded
+only inside each published period. Gold first validates the exact physical grid,
+then creates a fixed 96-quarter local-day grid. On daylight-saving transitions,
+repeated scalar wall-clock quarters are averaged, wind direction uses a circular
+mean, and missing spring clock positions are filled from adjacent values. This
+normalization is distinct from the physical market's 92- or 100-interval
+transition days. Evaluation returns physical-grid metrics and keeps the normalized
+96-slot metrics as separate diagnostics.
+
+On the autumn overlap, ENTSO-E's solar and onshore-wind forecast responses have a
+verified 96-quarter Period starting one hour after the 100-quarter delivery day.
+Silver keeps only those published intervals; Gold fills the four leading model
+slots only for those two series.
 
 The downloadable Gold CSV contains this prepared data. Retain the corresponding
 source attribution and terms when reusing its columns.
@@ -85,5 +95,7 @@ DELU or its results.
 Missing data remains pending and is retried on subsequent pipeline runs.
 Weather is requested as soon as its selected model run can be retrieved; there
 is no Berlin morning release gate. Original published forecasts retain their
-values and actual creation timestamps. Once actual SDAC prices are complete,
-evaluation compares them with the stored forecast.
+values and actual creation timestamps. Forecasts created after the `D-1` 12:00
+Europe/Berlin cutoff are labeled retrospective and excluded from operational
+rolling monitoring. Once actual SDAC prices are complete, evaluation compares
+them with the stored forecast.

@@ -229,7 +229,7 @@ available actual prices. Missing or temporarily unavailable data stays pending f
 the next run; it has no expiry. To backfill a specific inclusive delivery range:
 
 ```bash
-databricks bundle run -t prod --params start=2026-09-01,end=2026-09-05 data_pipeline
+databricks bundle run --profile PROFILE -t prod --params start=2026-09-01,end=2026-09-05 data_pipeline
 ```
 
 The same job fetches lagged inputs for the requested range. Without explicit
@@ -238,6 +238,15 @@ first published forecast (or the model's registration date on first use), and
 evaluation checks all stored forecasts. Published forecasts retain their original
 values and timestamps; newly backfilled predictions record their actual creation
 time and the model version used.
+
+To repair already accepted source responses, use the same bounded range with
+`refresh=true`. Bronze appends only payloads that changed, and Silver then selects
+the latest version. Evaluation continues from the repaired start date through the
+latest settled date so rolling metrics stay consistent:
+
+```bash
+databricks bundle run --profile PROFILE -t prod --params start=2026-09-01,end=2026-09-05,refresh=true data_pipeline
+```
 
 An overlapping trigger is queued behind the active run. Keep native queueing
 enabled and the single-run limit in the bundle: Silver and Gold rebuild shared
@@ -253,9 +262,8 @@ status. A successful run can still be waiting for unpublished source data.
 Validate availability with `/api/dates` and `/api/health`, then inspect a forecast
 and its evaluation on the website. Pending results refresh every five minutes and
 settled evaluations every 30 minutes, so backfilled rolling metrics can update
-without reopening the page. Historical
-`late` metrics are recomputed by evaluation; the UI shows quality alerts once
-and does not display retired cutoff labels.
+without reopening the page. Retrospective forecasts remain visible with physical
+delivery metrics but are excluded from operational rolling monitoring.
 
 </details>
 
@@ -279,10 +287,11 @@ The local model is saved to `artifacts/sdac_cqr`; both the snapshot and artifact
 are ignored by Git. Production versions are registered as `delu.ml.sdac_cqr`, with
 `@candidate` and `@prod` aliases.
 
-Settlement provides the feedback: released prices are joined to stored forecasts
-to calculate MAE, RMSE, bias, interval coverage, interval width, and interval score.
-Rolling error and coverage checks are recorded alongside the metrics without
-blocking data processing. Unexpected code, configuration, and authentication
+Settlement provides the feedback: physical Silver prices are joined to stored
+forecasts to calculate MAE, RMSE, bias, interval coverage, interval width, and
+interval score. Normalized 96-slot metrics remain separate model diagnostics.
+Rolling error and coverage checks use operational forecasts only. Unexpected
+code, configuration, and authentication
 failures still fail the job and trigger native Databricks notifications. Settled data becomes history for subsequent training.
 
 Method references:

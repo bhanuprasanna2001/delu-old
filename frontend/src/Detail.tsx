@@ -32,12 +32,14 @@ export default function Detail({ day, forecast, points, features, featuresError,
     <section aria-label="Forecast performance">
       <SectionHeading number="01" title="Forecast performance"><span className="section-context">{metrics ? `Evaluated ${formatTimestamp(metrics.evaluated_at)}` : 'Waiting for data'}</span></SectionHeading>
       {metrics ? <>
+        {forecast.forecast_kind === 'retrospective' ? <p aria-live="polite" className="inline-note text-warning">Retrospective reconstruction. Excluded from operational monitoring.</p> : null}
+        <p className="section-description">Primary accuracy uses the 92, 96, or 100 physical delivery intervals preserved in Silver. Normalized 96-slot MAE is <strong>{formatNumber(metrics.normalized_96_mae)} EUR/MWh</strong> and remains a model diagnostic.</p>
         <div className="metrics-grid">{metricDefinitions.map(item => <div className="metric" key={item.key} title={item.note}>
           <span className="metric-label">{item.label}</span><div className="metric-value">{item.percent ? percent(metrics[item.key]) : formatNumber(metrics[item.key])}</div>
           <span className="metric-unit">{item.percent ? `${percent(forecast.nominal_coverage).replace('.0%', '%')} target coverage` : 'EUR / MWh'}</span>
         </div>)}</div>
         <details className="metric-details"><summary>Definitions & rolling performance</summary><div className="mt-5 grid gap-x-12 gap-y-4 md:grid-cols-2 xl:grid-cols-3">{metricDefinitions.map(item => <p key={item.key}><strong>{item.label}.</strong> {item.note}</p>)}</div>
-          <div className="mt-5 border-t border-line pt-4">EXAA baseline MAE: <strong>{formatNumber(metrics.baseline_exaa_mae)} EUR/MWh</strong> · 7-day rolling MAE: <strong>{formatNumber(metrics.rolling_7d_mae)} EUR/MWh</strong> · 28-day rolling coverage: <strong>{percent(metrics.rolling_28d_picp)}</strong></div>
+          <div className="mt-5 border-t border-line pt-4">EXAA baseline MAE: <strong>{formatNumber(metrics.baseline_exaa_mae)} EUR/MWh</strong>{metrics.rolling_7d_mae == null || metrics.rolling_28d_picp == null ? ' · Rolling monitoring does not apply to retrospective forecasts.' : <> · 7-day rolling MAE: <strong>{formatNumber(metrics.rolling_7d_mae)} EUR/MWh</strong> · 28-day rolling coverage: <strong>{percent(metrics.rolling_28d_picp)}</strong></>}</div>
         </details>
         {metrics.monitoring_status === 'alert' && metrics.monitoring_reasons.length ? <p aria-live="polite" className="inline-note text-warning">Model monitoring: {metrics.monitoring_reasons.join(' · ')}</p> : null}
       </> : <div className="settlement-notice"><Clock3 size={20} className="shrink-0 text-muted" /><div><h3>{!day.has_forecast ? 'No forecast has been published for this day.' : day.settled ? 'Prices are settled. Evaluation is pending.' : 'Waiting for actual prices.'}</h3><p>{!day.has_forecast ? 'Market prices and inputs are available. Performance metrics appear when a forecast and actual prices are both available.' : 'The pipeline checks again automatically. Actual prices and evaluation results appear as the data becomes available.'}</p></div></div>}
@@ -100,13 +102,13 @@ const tables: Record<string, Column[]> = {
     { label: 'SDAC · one week earlier', key: 'price_de_lu_sdac_lag_7d_eur_per_mwh' },
   ],
   Load: [
-    { label: 'Forecast · previous day', key: 'load_day_ahead_forecast_mw' }, { label: 'Actual · two days earlier', key: 'load_actual_d_minus_2_mw' },
-    { label: 'Residual forecast · previous day', key: 'residual_load_day_ahead_forecast_mw' }, { label: 'Residual actual · two days earlier', key: 'residual_load_actual_d_minus_2_mw' },
+    { label: 'Forecast · previous day', key: 'load_forecast_delivery_d_minus_1_mw' }, { label: 'Actual · two days earlier', key: 'load_actual_d_minus_2_mw' },
+    { label: 'Residual forecast · previous day', key: 'residual_load_forecast_delivery_d_minus_1_mw' }, { label: 'Residual actual · two days earlier', key: 'residual_load_actual_d_minus_2_mw' },
   ],
   Generation: [
-    { label: 'Solar forecast · previous day', key: 'solar_day_ahead_forecast_mw' }, { label: 'Solar actual · two days earlier', key: 'solar_actual_d_minus_2_mw' },
-    { label: 'Onshore forecast · previous day', key: 'wind_onshore_day_ahead_forecast_mw' }, { label: 'Onshore actual · two days earlier', key: 'wind_onshore_actual_d_minus_2_mw' },
-    { label: 'Offshore forecast · previous day', key: 'wind_offshore_day_ahead_forecast_mw' }, { label: 'Offshore actual · two days earlier', key: 'wind_offshore_actual_d_minus_2_mw' },
+    { label: 'Solar forecast · previous day', key: 'solar_forecast_delivery_d_minus_1_mw' }, { label: 'Solar actual · two days earlier', key: 'solar_actual_d_minus_2_mw' },
+    { label: 'Onshore forecast · previous day', key: 'wind_onshore_forecast_delivery_d_minus_1_mw' }, { label: 'Onshore actual · two days earlier', key: 'wind_onshore_actual_d_minus_2_mw' },
+    { label: 'Offshore forecast · previous day', key: 'wind_offshore_forecast_delivery_d_minus_1_mw' }, { label: 'Offshore actual · two days earlier', key: 'wind_offshore_actual_d_minus_2_mw' },
   ],
   Weather: [
     { label: 'Temperature at 2 m (°C)', key: 'temperature_2m_c' },
@@ -155,10 +157,10 @@ const generationKeys = {
 function Fundamentals({ features }: { features: Features }) {
   const [generation, setGeneration] = useState<keyof typeof generationKeys>('Wind + solar')
   const rows = features.rows.toSorted((a, b) => a.quarter_of_day - b.quarter_of_day)
-  const load = rows.map(row => ({ quarter: row.quarter_of_day, forecast: row.load_day_ahead_forecast_mw / 1000, prior: row.load_actual_d_minus_2_mw / 1000 }))
+  const load = rows.map(row => ({ quarter: row.quarter_of_day, forecast: row.load_forecast_delivery_d_minus_1_mw / 1000, prior: row.load_actual_d_minus_2_mw / 1000 }))
   const renewable = rows.map(row => ({
     quarter: row.quarter_of_day,
-    forecast: generationKeys[generation].reduce((sum, key) => sum + row[`${key}_day_ahead_forecast_mw`], 0) / 1000,
+    forecast: generationKeys[generation].reduce((sum, key) => sum + row[`${key}_forecast_delivery_d_minus_1_mw`], 0) / 1000,
     prior: generationKeys[generation].reduce((sum, key) => sum + row[`${key}_actual_d_minus_2_mw`], 0) / 1000,
   }))
   return <div className="fundamentals-grid"><div className="fundamental-panel"><div className="fundamental-heading"><h3>Electricity load</h3><span className="text-[11px] text-muted">Germany</span></div><Chart points={load} series={inputSeries} unit="GW" label="Electricity load model inputs" /></div><div className="fundamental-panel"><div className="fundamental-heading"><h3>Renewable generation</h3><select aria-label="Generation source" value={generation} onChange={event => setGeneration(event.target.value as keyof typeof generationKeys)}>{Object.keys(generationKeys).map(key => <option key={key}>{key}</option>)}</select></div><Chart points={renewable} series={inputSeries} unit="GW" label={`${generation} generation model inputs`} /></div></div>

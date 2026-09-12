@@ -1,15 +1,19 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import type { Metrics } from '../src/data'
 
 // Deliberately synthetic, isolated HTTP fixtures. The website never serves demo data.
 const dates = [
-  { delivery_date: '2026-09-05', model_version: '1', predicted_at: '2026-09-04T13:36:00Z', settled: true, has_forecast: true, has_actual: true, has_metrics: true },
+  { delivery_date: '2026-09-05', model_version: '1', predicted_at: '2026-09-04T09:30:00Z', settled: true, has_forecast: true, has_actual: true, has_metrics: true },
   { delivery_date: '2026-09-03', model_version: null, predicted_at: null, settled: true, has_forecast: false, has_actual: true, has_metrics: false },
 ]
-const metrics = {
+const metrics: Metrics = {
   mae: 10, rmse: 12, bias: 1, picp: 0.9, mpiw: 40, interval_score: 50,
   baseline_exaa_mae: 11, baseline_7d_mae: 20, rolling_7d_mae: 9.5,
   rolling_7d_baseline_exaa_mae: 10.5, rolling_28d_picp: 0.89,
+  normalized_96_mae: 10.5, normalized_96_rmse: 12.5, normalized_96_bias: 1.5,
+  normalized_96_picp: 0.89, normalized_96_mpiw: 41, normalized_96_interval_score: 51,
+  normalized_96_baseline_exaa_mae: 11.5, normalized_96_baseline_7d_mae: 20.5,
   monitoring_status: 'ok', monitoring_reasons: [] as string[], evaluated_at: '2026-09-05T13:05:00Z',
 }
 const quarters = Array.from({ length: 96 }, (_, q) => ({
@@ -22,11 +26,11 @@ const quarters = Array.from({ length: 96 }, (_, q) => ({
 const features = Array.from({ length: 96 }, (_, q) => ({
   quarter_of_day: q, price_de_lu_exaa_eur_per_mwh: 28 + Math.sin(q / 12) * 60, price_at_exaa_eur_per_mwh: 40,
   price_de_lu_sdac_lag_1d_eur_per_mwh: 50, price_de_lu_sdac_lag_2d_eur_per_mwh: 45, price_de_lu_sdac_lag_7d_eur_per_mwh: 55,
-  load_day_ahead_forecast_mw: 40000 + q * 80, load_actual_d_minus_2_mw: 42000 + q * 80,
-  solar_day_ahead_forecast_mw: 1000 + q * 100, solar_actual_d_minus_2_mw: 800 + q * 80,
-  wind_onshore_day_ahead_forecast_mw: 10000, wind_onshore_actual_d_minus_2_mw: 8000,
-  wind_offshore_day_ahead_forecast_mw: 3000, wind_offshore_actual_d_minus_2_mw: 3500,
-  residual_load_day_ahead_forecast_mw: 25000, residual_load_actual_d_minus_2_mw: 27000,
+  load_forecast_delivery_d_minus_1_mw: 40000 + q * 80, load_actual_d_minus_2_mw: 42000 + q * 80,
+  solar_forecast_delivery_d_minus_1_mw: 1000 + q * 100, solar_actual_d_minus_2_mw: 800 + q * 80,
+  wind_onshore_forecast_delivery_d_minus_1_mw: 10000, wind_onshore_actual_d_minus_2_mw: 8000,
+  wind_offshore_forecast_delivery_d_minus_1_mw: 3000, wind_offshore_actual_d_minus_2_mw: 3500,
+  residual_load_forecast_delivery_d_minus_1_mw: 25000, residual_load_actual_d_minus_2_mw: 27000,
   day_of_week: 5, month: 9, season: 'autumn', is_weekend: true, is_holiday_de_nationwide: false, is_holiday_lu: false,
 }))
 const weather = Array.from({ length: 96 }, (_, q) => ({
@@ -37,7 +41,7 @@ const weather = Array.from({ length: 96 }, (_, q) => ({
   cloud_cover_pct: 55 + Math.sin(q / 96 * Math.PI * 2) * 30,
 }))
 
-async function mockApi(page: Page, mode: { settled?: boolean; featuresError?: boolean; datesError?: boolean; empty?: boolean; metrics?: typeof metrics } = {}) {
+async function mockApi(page: Page, mode: { settled?: boolean; featuresError?: boolean; datesError?: boolean; empty?: boolean; metrics?: typeof metrics; forecastKind?: 'operational' | 'retrospective' } = {}) {
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url())
     if (url.pathname.includes('/downloads/')) return route.fulfill({
@@ -67,7 +71,8 @@ async function mockApi(page: Page, mode: { settled?: boolean; featuresError?: bo
       delivery_date: day, quarters: quarters.map(row => ({ quarter_of_day: row.quarter_of_day, actual_price_eur_per_mwh: row.actual_price_eur_per_mwh, price_de_lu_exaa_eur_per_mwh: 50, price_at_exaa_eur_per_mwh: 55 })),
     } })
     return route.fulfill({ json: {
-      delivery_date: day, model_version: '1', predicted_at: '2026-09-04T13:36:00Z', nominal_coverage: 0.9,
+      delivery_date: day, model_version: '1', predicted_at: mode.forecastKind === 'retrospective' ? '2026-09-04T13:36:00Z' : '2026-09-04T09:30:00Z',
+      forecast_kind: mode.forecastKind ?? 'operational', nominal_coverage: 0.9,
       settled: mode.settled !== false, metrics: mode.settled === false ? null : mode.metrics ?? metrics,
       quarters: mode.settled === false ? quarters.map(row => ({ ...row, actual_price_eur_per_mwh: null })) : quarters,
     } })
@@ -100,8 +105,7 @@ test('overview, precise tooltip, detail layout, inputs, generation selector and 
   await page.getByRole('button', { name: 'Open detailed view', exact: true }).click()
   await expect(page).toHaveURL(/view=detail/)
   await expect(page.getByRole('heading', { name: 'Forecast performance', exact: true })).toBeVisible()
-  await expect(page.getByText('Published 04 Sept, 15:36 CEST', { exact: true })).toBeVisible()
-  await expect(page.getByText(/cutoff|on-time monitoring|11:30|15:00/)).toHaveCount(0)
+  await expect(page.getByText('Operational forecast · Published 04 Sept, 11:30 CEST', { exact: true })).toBeVisible()
   await expect(page.getByText('90.0%', { exact: true }).first()).toBeVisible()
   if (!isMobile) {
     const bounds = await page.locator('.metrics-grid').boundingBox()
@@ -223,13 +227,14 @@ test('settled evaluations refresh and show each quality alert once', async ({ pa
   await expect(page.getByText(/seven-day model MAE is worse than the EXAA baseline/)).toHaveCount(1)
 })
 
-test('legacy cutoff metadata never becomes a public warning', async ({ page }) => {
-  await mockApi(page, { metrics: { ...metrics, monitoring_status: 'late', monitoring_reasons: ['forecast created outside the D-1 15:00 production cutoff', 'excluded from on-time monitoring'] } })
+test('retrospective forecasts are clearly excluded from operational monitoring', async ({ page }) => {
+  await mockApi(page, { forecastKind: 'retrospective', metrics: { ...metrics, monitoring_status: 'not_applicable', rolling_7d_mae: null, rolling_7d_baseline_exaa_mae: null, rolling_28d_picp: null } })
   await page.goto('/?date=2026-09-05&view=detail')
   await expect(page.getByText('Mean absolute error', { exact: true })).toBeVisible()
   await page.getByText('Definitions & rolling performance', { exact: true }).click()
-  await expect(page.getByText('Published 04 Sept, 15:36 CEST', { exact: true })).toBeVisible()
-  await expect(page.getByText(/cutoff|on-time monitoring|Monitoring: late/)).toHaveCount(0)
+  await expect(page.getByText('Retrospective forecast · Generated 04 Sept, 15:36 CEST', { exact: true })).toBeVisible()
+  await expect(page.getByText('Retrospective reconstruction. Excluded from operational monitoring.', { exact: true })).toBeVisible()
+  await expect(page.getByText(/Rolling monitoring does not apply/)).toBeVisible()
 })
 
 test('sources have a direct page and remain accessible when market data is unavailable', async ({ page }) => {

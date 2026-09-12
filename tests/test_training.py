@@ -73,6 +73,20 @@ def test_incompatible_production_model_is_skipped_during_migration(monkeypatch) 
     assert production is None
 
 
+def test_old_model_data_version_is_skipped_even_when_features_match(
+    monkeypatch,
+) -> None:
+    client = MagicMock()
+    client.get_model_version_by_alias.return_value.version = "1"
+    old_model = ConformalPriceForecaster(feature_count=3, reference_feature_index=0)
+    old_model.model_data_version = 1
+    monkeypatch.setattr("delu.ml.train.mlflow.sklearn.load_model", lambda _: old_model)
+
+    production = _load_production_metrics(client, daily_data(5, 3))
+
+    assert production is None
+
+
 def test_model_export_is_a_versioned_mlflow_archive(
     tmp_path: Path,
     monkeypatch,

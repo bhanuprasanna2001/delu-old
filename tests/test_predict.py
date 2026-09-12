@@ -12,7 +12,11 @@ from pyspark.sql import SparkSession
 
 from delu.ml.data import BOOLEAN_FEATURES, FEATURE_NAMES, NUMERIC_FEATURES
 from delu.ml.model import BoostingConfig, ConformalPriceForecaster
-from delu.ml.predict import FORECAST_RUN_TABLE, forecast_day
+from delu.ml.predict import (
+    FORECAST_RUN_TABLE,
+    _require_operational_forecast,
+    forecast_day,
+)
 from delu.pipeline.gold import TABLE as GOLD_TABLE
 
 
@@ -56,33 +60,39 @@ def prediction(monkeypatch):
     spark = MagicMock(spec=SparkSession)
     spark.catalog.tableExists.side_effect = lambda table: table == GOLD_TABLE
     spark.table.return_value = query
+    spark.sql.return_value.first.return_value = SimpleNamespace(version=7)
     spark.createDataFrame.return_value.limit.return_value.count.return_value = 1
-    return spark, query
+    return spark, query, model
 
 
 @pytest.mark.parametrize(
-    "now",
+    ("now", "forecast_kind"),
     [
-        datetime(2026, 9, 4, 13, 36, tzinfo=UTC),
-        datetime(2026, 9, 10, 18, tzinfo=UTC),
+        (datetime(2026, 9, 4, 9, 30, tzinfo=UTC), "operational"),
+        (datetime(2026, 9, 4, 13, 36, tzinfo=UTC), "retrospective"),
+        (datetime(2026, 9, 10, 18, tzinfo=UTC), "retrospective"),
     ],
-    ids=["after-1500", "five-days-later"],
+    ids=["before-cutoff", "after-cutoff", "five-days-later"],
 )
-def test_delayed_forecast_publishes_with_its_actual_creation_time(
-    prediction, now
+def test_forecast_records_when_and_how_it_was_created(
+    prediction, now, forecast_kind
 ) -> None:
-    spark, _query = prediction
+    spark, _query, _model = prediction
 
     assert forecast_day(date(2026, 9, 5), spark=spark, now=now) == "1"
 
     saved = spark.createDataFrame.call_args_list[0].args[0]
     assert len(saved) == 96
     assert saved["predicted_at"].eq(now.replace(tzinfo=None)).all()
+    assert saved["forecast_kind"].eq(forecast_kind).all()
     assert np.isfinite(saved["predicted_price_eur_per_mwh"]).all()
+    run = spark.createDataFrame.call_args_list[1].args[0]
+    assert run.loc[0, "gold_table_version"] == 7
+    assert run.loc[0, "model_data_version"] == 2
 
 
 def test_retry_preserves_an_existing_forecast(prediction) -> None:
-    spark, query = prediction
+    spark, query, _model = prediction
     spark.catalog.tableExists.side_effect = lambda table: table == FORECAST_RUN_TABLE
     query.first.return_value = SimpleNamespace(model_version="1")
 
@@ -93,9 +103,67 @@ def test_retry_preserves_an_existing_forecast(prediction) -> None:
 
 
 def test_missing_model_inputs_remain_pending(prediction) -> None:
-    spark, query = prediction
+    spark, query, _model = prediction
     query.toPandas.return_value = query.toPandas.return_value.iloc[:80]
 
     assert forecast_day(date(2026, 9, 5), spark=spark) is None
 
     spark.createDataFrame.assert_not_called()
+
+
+def test_prediction_rejects_a_model_trained_on_old_data(prediction) -> None:
+    spark, _query, model = prediction
+    model.model_data_version = 1
+
+    with pytest.raises(ValueError, match="must be retrained"):
+        forecast_day(date(2026, 9, 5), spark=spark)
+
+    spark.createDataFrame.assert_not_called()
+
+
+def test_forecast_kind_uses_the_time_prediction_finished(
+    prediction, monkeypatch
+) -> None:
+    spark, _query, model = prediction
+    finished = False
+    predict = model.predict
+
+    def finish_prediction(features):
+        nonlocal finished
+        result = predict(features)
+        finished = True
+        return result
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = (
+                datetime(2026, 9, 4, 10, 1, tzinfo=UTC)
+                if finished
+                else datetime(2026, 9, 4, 9, 59, tzinfo=UTC)
+            )
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(model, "predict", finish_prediction)
+    monkeypatch.setattr("delu.ml.predict.datetime", Clock)
+
+    forecast_day(date(2026, 9, 5), spark=spark)
+
+    saved = spark.createDataFrame.call_args_list[0].args[0]
+    assert saved["forecast_kind"].eq("retrospective").all()
+
+
+def test_operational_readiness_is_not_checked_before_cutoff() -> None:
+    spark = MagicMock(spec=SparkSession)
+
+    _require_operational_forecast(spark, datetime(2026, 9, 4, 9, 30, tzinfo=UTC))
+
+    spark.catalog.tableExists.assert_not_called()
+
+
+def test_missing_operational_forecast_fails_after_cutoff() -> None:
+    spark = MagicMock(spec=SparkSession)
+    spark.catalog.tableExists.return_value = False
+
+    with pytest.raises(RuntimeError, match="No operational forecast exists"):
+        _require_operational_forecast(spark, datetime(2026, 9, 4, 13, 30, tzinfo=UTC))

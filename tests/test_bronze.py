@@ -211,6 +211,48 @@ def test_authentication_failure_remains_an_error_after_successes_are_saved(
     assert (date(2026, 9, 8), "de_lu.price.sdac") in stored
 
 
+def test_malformed_payload_fails_the_run(ingestion) -> None:
+    spark, client, _stored = ingestion
+    client.query_day_ahead_prices.return_value = PAYLOAD.replace("MWH", "INVALID")
+
+    with pytest.raises(RuntimeError, match="source response"):
+        ingest(start=date(2026, 9, 8), end=date(2026, 9, 8), spark=spark)
+
+
+def test_refresh_appends_only_a_changed_payload(ingestion, monkeypatch) -> None:
+    spark, client, _stored = ingestion
+    day = date(2026, 9, 8)
+    monkeypatch.setattr(
+        "delu.pipeline.bronze._planned_requests",
+        Mock(
+            return_value=[
+                (day, "de_lu.price.sdac", "query_day_ahead_prices", "DE_LU", {})
+            ]
+        ),
+    )
+    existing = spark.table.return_value
+    existing.withColumn.return_value = existing
+    existing.collect.side_effect = None
+    existing.collect.return_value = [
+        SimpleNamespace(
+            delivery_date=day,
+            series="de_lu.price.sdac",
+            payload=PAYLOAD,
+        )
+    ]
+    client.query_day_ahead_prices.return_value = PAYLOAD
+
+    assert ingest(start=day, end=day, refresh=True, spark=spark) == 0
+
+    client.query_day_ahead_prices.return_value = PAYLOAD.replace(">50<", ">51<")
+    assert ingest(start=day, end=day, refresh=True, spark=spark) == 1
+
+
+def test_refresh_requires_a_bounded_range() -> None:
+    with pytest.raises(ValueError, match="explicit start and end"):
+        ingest(start=date(2026, 9, 8), refresh=True)
+
+
 def test_unpublished_weather_run_stays_pending(ingestion, monkeypatch, caplog) -> None:
     spark, _client, stored = ingestion
     stored.add((date(2026, 9, 8), "de_lu.price.sdac"))

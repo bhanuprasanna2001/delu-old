@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 from databricks import sql
 from databricks.sdk.errors import DatabricksError
@@ -65,9 +65,17 @@ class ForecastMetrics(BaseModel):
     interval_score: float
     baseline_exaa_mae: float
     baseline_7d_mae: float
-    rolling_7d_mae: float
-    rolling_7d_baseline_exaa_mae: float
-    rolling_28d_picp: float
+    normalized_96_mae: float
+    normalized_96_rmse: float
+    normalized_96_bias: float
+    normalized_96_picp: float
+    normalized_96_mpiw: float
+    normalized_96_interval_score: float
+    normalized_96_baseline_exaa_mae: float
+    normalized_96_baseline_7d_mae: float
+    rolling_7d_mae: float | None
+    rolling_7d_baseline_exaa_mae: float | None
+    rolling_28d_picp: float | None
     monitoring_status: str
     monitoring_reasons: list[str]
     evaluated_at: datetime
@@ -77,6 +85,7 @@ class ForecastDay(BaseModel):
     delivery_date: date
     model_version: str
     predicted_at: datetime
+    forecast_kind: Literal["operational", "retrospective"]
     nominal_coverage: float
     settled: bool
     metrics: ForecastMetrics | None
@@ -182,8 +191,12 @@ def _forecast_response(day: date, rows: list[dict[str, Any]]) -> ForecastDay:
 
     versions = {str(row["model_version"]) for row in rows}
     predicted_at = {row["predicted_at"] for row in rows}
+    forecast_kinds = {row["forecast_kind"] for row in rows}
     coverage = {float(row["nominal_coverage"]) for row in rows}
-    if len(versions) != 1 or len(predicted_at) != 1 or len(coverage) != 1:
+    if any(
+        len(values) != 1
+        for values in (versions, predicted_at, forecast_kinds, coverage)
+    ):
         raise HTTPException(status_code=503, detail="Forecast metadata is inconsistent")
 
     actual_count = sum(row["actual_price_eur_per_mwh"] is not None for row in rows)
@@ -207,6 +220,7 @@ def _forecast_response(day: date, rows: list[dict[str, Any]]) -> ForecastDay:
         delivery_date=day,
         model_version=versions.pop(),
         predicted_at=_as_utc(predicted_at.pop()),
+        forecast_kind=forecast_kinds.pop(),
         nominal_coverage=coverage.pop(),
         settled=actual_count == 96,
         metrics=metrics,

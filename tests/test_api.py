@@ -29,6 +29,7 @@ def forecast_rows() -> list[dict[str, object]]:
         "delivery_date": date(2026, 9, 5),
         "model_version": "1",
         "predicted_at": datetime(2026, 9, 4, 9, 30, tzinfo=UTC),
+        "forecast_kind": "operational",
         "nominal_coverage": 0.9,
         "mae": 10.0,
         "rmse": 12.0,
@@ -38,6 +39,14 @@ def forecast_rows() -> list[dict[str, object]]:
         "bias": 1.0,
         "baseline_exaa_mae": 11.0,
         "baseline_7d_mae": 20.0,
+        "normalized_96_mae": 10.5,
+        "normalized_96_rmse": 12.5,
+        "normalized_96_picp": 0.89,
+        "normalized_96_mpiw": 41.0,
+        "normalized_96_interval_score": 51.0,
+        "normalized_96_bias": 1.5,
+        "normalized_96_baseline_exaa_mae": 11.5,
+        "normalized_96_baseline_7d_mae": 20.5,
         "evaluated_at": datetime(2026, 9, 5, 13, 0, tzinfo=UTC),
         "monitoring_status": "ok",
         "monitoring_reasons": "",
@@ -67,7 +76,9 @@ def test_forecast_endpoint_returns_complete_settled_day() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["settled"] is True
+    assert payload["forecast_kind"] == "operational"
     assert payload["metrics"]["mae"] == 10.0
+    assert payload["metrics"]["normalized_96_mae"] == 10.5
     assert len(payload["quarters"]) == 96
     assert payload["quarters"][0]["delivery_start_local"] == "2026-09-05T00:00:00"
     assert response.headers["cache-control"] == (

@@ -24,5 +24,5 @@ direct navigation and refresh through FastAPI. Keep its provider details in
 and charts also retain their direct Open-Meteo credit.
 
 Browser tests cover desktop and mobile navigation, downloads, pending-data
-refresh, updated settled evaluations, legacy cutoff metadata, and access to the
-sources page during an API outage. Run `npm test` from this directory.
+refresh, updated settled evaluations, retrospective forecast labels, and access
+to the sources page during an API outage. Run `npm test` from this directory.

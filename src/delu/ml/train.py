@@ -32,6 +32,7 @@ from delu.ml.data import (
 from delu.ml.metrics import forecast_metrics
 from delu.ml.model import (
     INTERVAL_CONFIG,
+    MODEL_DATA_VERSION,
     POINT_CONFIG,
     ConformalPriceForecaster,
 )
@@ -93,8 +94,11 @@ def _load_production_metrics(
     model = mlflow.sklearn.load_model(f"models:/{MODEL_NAME}@prod")
     if not isinstance(model, ConformalPriceForecaster):
         raise TypeError("The production model has an incompatible Python type")
-    if model.feature_count != test.features.shape[-1]:
-        LOGGER.warning("Skipping production comparison after a feature schema change")
+    if (
+        model.feature_count != test.features.shape[-1]
+        or getattr(model, "model_data_version", None) != MODEL_DATA_VERSION
+    ):
+        LOGGER.warning("Skipping production comparison after a model-data change")
         return None
     return version.version, _metrics(model, test)
 
@@ -193,6 +197,7 @@ def evaluate_candidate(
 def _metadata(result: CandidateResult, through: date) -> dict[str, object]:
     return {
         "feature_names": list(FEATURE_NAMES),
+        "model_data_version": MODEL_DATA_VERSION,
         "target_coverage": TARGET_COVERAGE,
         "calibration_days": CALIBRATION_DAYS,
         "training_through": through.isoformat(),
@@ -251,6 +256,7 @@ def _publish_model_manifest(
     manifest = {
         "model_name": MODEL_NAME,
         "model_family": "hist_gradient_boosting_cqr",
+        "model_data_version": MODEL_DATA_VERSION,
         "version": version,
         "training_run_id": run_id,
         "training_through": through.isoformat(),
@@ -359,6 +365,7 @@ def train_monthly(
                 },
                 "point_shrinkage": result.point_shrinkage,
                 "feature_count": len(FEATURE_NAMES),
+                "model_data_version": MODEL_DATA_VERSION,
                 "target_coverage": TARGET_COVERAGE,
                 "calibration_days": CALIBRATION_DAYS,
                 "walk_forward_folds": WALK_FORWARD_FOLDS,

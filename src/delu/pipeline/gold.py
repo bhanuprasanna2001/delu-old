@@ -29,9 +29,11 @@ from delu.pipeline.bronze import (
     WEATHER_FIELDS,
     WEATHER_LOCATIONS,
 )
+from delu.pipeline.silver import KNOWN_AUTUMN_96_SERIES
 from delu.pipeline.silver import TABLE as SILVER_TABLE
 
 TABLE = "delu.gold.model_input"
+HOLIDAY_TABLE = "delu.silver.holidays"
 HOLIDAYS_URL = "https://openholidaysapi.org/PublicHolidays"
 QUARTERS_PER_DAY = 96
 KEY = ["delivery_date", "quarter_of_day"]
@@ -66,10 +68,10 @@ FEATURE_COLUMNS = (
     "price_at_exaa_eur_per_mwh",
     *(f"price_de_lu_sdac_lag_{days}d_eur_per_mwh" for days in PRICE_LAGS),
     *(
-        "load_day_ahead_forecast_mw",
-        "solar_day_ahead_forecast_mw",
-        "wind_onshore_day_ahead_forecast_mw",
-        "wind_offshore_day_ahead_forecast_mw",
+        "load_forecast_delivery_d_minus_1_mw",
+        "solar_forecast_delivery_d_minus_1_mw",
+        "wind_onshore_forecast_delivery_d_minus_1_mw",
+        "wind_offshore_forecast_delivery_d_minus_1_mw",
         "load_actual_d_minus_2_mw",
         "solar_actual_d_minus_2_mw",
         "wind_onshore_actual_d_minus_2_mw",
@@ -90,9 +92,24 @@ HOLIDAY_SCHEMA = StructType(
 
 def _validate_silver(silver: DataFrame) -> None:
     """Reject invalid measurements without requiring every source to be present."""
-    invalid = F.col("value").isNull() | F.isnan("value")
+    value = F.col("value")
+    invalid = (
+        value.isNull()
+        | F.isnan(value)
+        | (value == F.lit(float("inf")))
+        | (value == F.lit(float("-inf")))
+    )
     if silver.where(invalid).limit(1).count():
-        raise ValueError("Silver contains null or NaN measurements")
+        raise ValueError("Silver contains non-finite measurements")
+    duplicate = (
+        silver.groupBy("delivery_date", "delivery_start_utc", "series")
+        .count()
+        .where(F.col("count") > 1)
+        .limit(1)
+        .count()
+    )
+    if duplicate:
+        raise ValueError("Silver contains duplicate measurement keys")
 
 
 def _normalise_intervals(silver: DataFrame) -> DataFrame:
@@ -110,7 +127,51 @@ def _normalise_intervals(silver: DataFrame) -> DataFrame:
             + F.floor(F.minute("delivery_start_local") / F.lit(15)),
         )
     )
-    values = source.groupBy(*KEY, "series").agg(F.avg("value").alias("value"))
+    start = F.to_utc_timestamp(
+        F.col("delivery_date").cast("timestamp"), "Europe/Berlin"
+    )
+    end = F.to_utc_timestamp(
+        F.date_add("delivery_date", 1).cast("timestamp"), "Europe/Berlin"
+    )
+    step = F.when(
+        F.col("series").startswith("weather."), F.expr("INTERVAL 1 HOUR")
+    ).otherwise(F.expr("INTERVAL 15 MINUTES"))
+    grids = (
+        source.groupBy("delivery_date", "series")
+        .agg(F.sort_array(F.collect_set("delivery_start_utc")).alias("actual"))
+        .withColumn("expected", F.sequence(start, end - step, step))
+    )
+    known_autumn_gap = (
+        F.col("series").isin(*KNOWN_AUTUMN_96_SERIES)
+        & (F.size("expected") == 100)
+        & (F.col("actual") == F.slice("expected", 5, 96))
+    )
+    if (
+        grids.where((F.col("actual") != F.col("expected")) & ~known_autumn_gap)
+        .limit(1)
+        .count()
+    ):
+        raise ValueError("Silver contains an incomplete or misaligned physical day")
+
+    values = source.groupBy(*KEY, "series").agg(
+        F.avg("value").alias("scalar_mean"),
+        F.avg(F.sin(F.radians("value"))).alias("mean_sin"),
+        F.avg(F.cos(F.radians("value"))).alias("mean_cos"),
+        F.count("*").alias("physical_count"),
+    )
+    direction = F.col("series").endswith(".wind_direction_100m")
+    resultant = F.hypot("mean_sin", "mean_cos")
+    if values.where(direction & (resultant < 1e-12)).limit(1).count():
+        raise ValueError("Repeated wind directions have an undefined circular mean")
+    circular = F.pmod(F.degrees(F.atan2("mean_sin", "mean_cos")), F.lit(360.0))
+    circular = F.when(circular > 360 - 1e-9, 0.0).otherwise(circular)
+    values = values.select(
+        *KEY,
+        "series",
+        F.when(direction & (F.col("physical_count") > 1), circular)
+        .otherwise(F.col("scalar_mean"))
+        .alias("value"),
+    )
     grid = (
         source.select("delivery_date", "series")
         .distinct()
@@ -141,10 +202,25 @@ def _normalise_intervals(silver: DataFrame) -> DataFrame:
         * (F.col("quarter_of_day") - previous_q)
         / (next_q - previous_q)
     )
-    filled = F.when(
-        F.col("series").startswith("weather."),
-        F.coalesce(F.col("value"), previous_value, next_value),
-    ).otherwise(F.coalesce(F.col("value"), interpolated))
+    weather_value = (
+        F.when(direction, previous_value)
+        .when(
+            F.floor(F.col("quarter_of_day") / 4) == F.floor(previous_q / 4),
+            previous_value,
+        )
+        .otherwise(interpolated)
+    )
+    filled = (
+        F.when(
+            F.col("series").startswith("weather."),
+            F.coalesce(F.col("value"), weather_value, next_value),
+        )
+        .when(
+            F.col("series").isin(*KNOWN_AUTUMN_96_SERIES),
+            F.coalesce(F.col("value"), interpolated, next_value),
+        )
+        .otherwise(F.coalesce(F.col("value"), interpolated))
+    )
     result = grid.withColumn("value", filled).select(*KEY, "series", "value")
     if result.where(F.col("value").isNull()).limit(1).count():
         raise ValueError("Silver contains a gap that cannot be mapped to 96 quarters")
@@ -229,6 +305,8 @@ def _covered_dates(items: list[dict[str, object]]) -> set[date]:
     for item in items:
         current = date.fromisoformat(str(item["startDate"]))
         end = date.fromisoformat(str(item["endDate"]))
+        if current > end:
+            raise ValueError("Holiday startDate cannot be after endDate")
         while current <= end:
             covered.add(current)
             current += timedelta(days=1)
@@ -255,22 +333,43 @@ def _fetch_holidays(country: str, start: date, end: date) -> set[date]:
 
 
 def _holiday_frame(spark: SparkSession, start: date, end: date) -> DataFrame:
-    german = _fetch_holidays("DE", start, end)
-    luxembourg = _fetch_holidays("LU", start, end)
-    dates = sorted(german | luxembourg)
-    return spark.createDataFrame(
+    expected_days = (end - start).days + 1
+    if spark.catalog.tableExists(HOLIDAY_TABLE):
+        cached = spark.table(HOLIDAY_TABLE).where(
+            F.col("delivery_date").between(F.lit(start), F.lit(end))
+        )
+        if cached.count() == expected_days:
+            return cached
+
+    cache_start = date(start.year, 1, 1)
+    cache_end = date(end.year, 12, 31)
+    german = _fetch_holidays("DE", cache_start, cache_end)
+    luxembourg = _fetch_holidays("LU", cache_start, cache_end)
+    dates = [
+        cache_start + timedelta(days=offset)
+        for offset in range((cache_end - cache_start).days + 1)
+    ]
+    calendar = spark.createDataFrame(
         [(day, day in german, day in luxembourg) for day in dates],
         schema=HOLIDAY_SCHEMA,
     )
+    spark.sql("CREATE SCHEMA IF NOT EXISTS delu.silver")
+    (
+        calendar.write.format("delta")
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
+        .saveAsTable(HOLIDAY_TABLE)
+    )
+    return calendar.where(F.col("delivery_date").between(F.lit(start), F.lit(end)))
 
 
 def _add_residuals(frame: DataFrame) -> DataFrame:
     return frame.withColumn(
-        "residual_load_day_ahead_forecast_mw",
-        F.col("load_day_ahead_forecast_mw")
-        - F.col("solar_day_ahead_forecast_mw")
-        - F.col("wind_onshore_day_ahead_forecast_mw")
-        - F.col("wind_offshore_day_ahead_forecast_mw"),
+        "residual_load_forecast_delivery_d_minus_1_mw",
+        F.col("load_forecast_delivery_d_minus_1_mw")
+        - F.col("solar_forecast_delivery_d_minus_1_mw")
+        - F.col("wind_onshore_forecast_delivery_d_minus_1_mw")
+        - F.col("wind_offshore_forecast_delivery_d_minus_1_mw"),
     ).withColumn(
         "residual_load_actual_d_minus_2_mw",
         F.col("load_actual_d_minus_2_mw")
@@ -306,10 +405,10 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
             intervals,
             FORECAST,
             (
-                "load_day_ahead_forecast_mw",
-                "solar_day_ahead_forecast_mw",
-                "wind_onshore_day_ahead_forecast_mw",
-                "wind_offshore_day_ahead_forecast_mw",
+                "load_forecast_delivery_d_minus_1_mw",
+                "solar_forecast_delivery_d_minus_1_mw",
+                "wind_onshore_forecast_delivery_d_minus_1_mw",
+                "wind_offshore_forecast_delivery_d_minus_1_mw",
             ),
         ),
         1,
@@ -372,11 +471,9 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
         )
         return
 
-    result = (
-        result.join(_calendar_frame(spark, bounds.start, bounds.end), KEY, "inner")
-        .join(holidays, "delivery_date", "left")
-        .fillna({"is_holiday_de_nationwide": False, "is_holiday_lu": False})
-    )
+    result = result.join(
+        _calendar_frame(spark, bounds.start, bounds.end), KEY, "inner"
+    ).join(holidays, "delivery_date", "inner")
 
     output_columns = [
         "delivery_date",
@@ -394,11 +491,11 @@ def build(spark: SparkSession | None = None, through: date | None = None) -> Non
         "price_de_lu_exaa_eur_per_mwh",
         "price_at_exaa_eur_per_mwh",
         *(f"price_de_lu_sdac_lag_{days}d_eur_per_mwh" for days in PRICE_LAGS),
-        "load_day_ahead_forecast_mw",
-        "solar_day_ahead_forecast_mw",
-        "wind_onshore_day_ahead_forecast_mw",
-        "wind_offshore_day_ahead_forecast_mw",
-        "residual_load_day_ahead_forecast_mw",
+        "load_forecast_delivery_d_minus_1_mw",
+        "solar_forecast_delivery_d_minus_1_mw",
+        "wind_onshore_forecast_delivery_d_minus_1_mw",
+        "wind_offshore_forecast_delivery_d_minus_1_mw",
+        "residual_load_forecast_delivery_d_minus_1_mw",
         "load_actual_d_minus_2_mw",
         "solar_actual_d_minus_2_mw",
         "wind_onshore_actual_d_minus_2_mw",

@@ -18,7 +18,7 @@ from databricks.connect import DatabricksSession
 from entsoe import EntsoeRawClient
 from entsoe.exceptions import NoMatchingDataError
 from pyspark.dbutils import DBUtils
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 
 TABLE = "delu.bronze.raw"
@@ -67,6 +67,11 @@ BATCH_DAYS = 7
 PRICE_LAGS = (1, 2, 7)
 RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504, 530, 599})
 LOGGER = logging.getLogger(__name__)
+
+
+class IncompletePublication(ValueError):
+    """The source response is valid but does not yet cover the requested day."""
+
 
 Request = tuple[str, str, str, Mapping[str, object]]
 PlannedRequest = tuple[date, str, str, str, Mapping[str, object]]
@@ -210,10 +215,13 @@ def ingest(
     end: date | None = None,
     now: datetime | None = None,
     workers: int = WORKERS,
+    refresh: bool = False,
     spark: SparkSession | None = None,
 ) -> int:
     if workers < 1:
         raise ValueError("workers must be at least 1")
+    if refresh and (start is None or end is None):
+        raise ValueError("refresh requires an explicit start and end")
 
     current = datetime.now(UTC) if now is None else now
     if current.tzinfo is None or current.utcoffset() is None:
@@ -237,21 +245,34 @@ def ingest(
         LOGGER.info("Nothing new to ingest.")
         return 0
 
-    existing = {
-        (row.delivery_date, row.series)
-        for row in spark.table(TABLE)
-        .where(
-            F.col("delivery_date").isin(
-                {delivery_date for delivery_date, *_ in planned}
+    stored = spark.table(TABLE).where(
+        F.col("delivery_date").isin({delivery_date for delivery_date, *_ in planned})
+    )
+    existing_payloads: dict[tuple[date, str], str] = {}
+    if refresh:
+        latest = (
+            stored.withColumn(
+                "_rank",
+                F.row_number().over(
+                    Window.partitionBy("delivery_date", "series").orderBy(
+                        F.col("ingested_at").desc()
+                    )
+                ),
             )
+            .where(F.col("_rank") == 1)
+            .select("delivery_date", "series", "payload")
         )
-        .select("delivery_date", "series")
-        .distinct()
-        .collect()
-    }
-    planned = [
-        request for request in planned if (request[0], request[1]) not in existing
-    ]
+        existing_payloads = {
+            (row.delivery_date, row.series): row.payload for row in latest.collect()
+        }
+    else:
+        existing = {
+            (row.delivery_date, row.series)
+            for row in stored.select("delivery_date", "series").distinct().collect()
+        }
+        planned = [
+            request for request in planned if (request[0], request[1]) not in existing
+        ]
     if not planned:
         LOGGER.info("Nothing new to ingest.")
         return 0
@@ -299,7 +320,7 @@ def ingest(
             requests.Timeout,
             gaierror,
             RemoteDisconnected,
-            ValueError,
+            IncompletePublication,
         ) as exc:
             reason = f"{type(exc).__name__}: {exc}"
         LOGGER.warning(
@@ -312,57 +333,54 @@ def ingest(
 
     written = 0
     failures: list[tuple[date, str, Exception]] = []
-    groups = (
-        [request for request in planned if request[2] == "weather"],
-        [request for request in planned if request[2] != "weather"],
-    )
-    for requests_for_source in groups:
-        if not requests_for_source:
-            continue
-        if requests_for_source[0][2] != "weather":
+    for dates in batched(
+        sorted({request[0] for request in planned}, reverse=True), BATCH_DAYS
+    ):
+        batch = sorted(
+            (request for request in planned if request[0] in dates),
+            key=lambda request: request[0],
+            reverse=True,
+        )
+        if api_key is None and any(request[2] != "weather" for request in batch):
             api_key = os.getenv("ENTSOE_API_KEY") or DBUtils(spark).secrets.get(
                 scope="delu", key="entsoe-api-key"
             )
-        for dates in batched(
-            sorted({request[0] for request in requests_for_source}), BATCH_DAYS
-        ):
-            batch = [request for request in requests_for_source if request[0] in dates]
-            LOGGER.info(
-                "Fetching %d source responses for %s through %s with %d workers.",
-                len(batch),
-                dates[0],
-                dates[-1],
-                min(workers, len(batch)),
-            )
-            with ThreadPoolExecutor(max_workers=min(workers, len(batch))) as pool:
-                futures = [(request, pool.submit(fetch, request)) for request in batch]
-                rows = []
-                for request, future in futures:
-                    try:
-                        row = future.result()
-                        if row is not None:
-                            rows.append(row)
-                    except Exception as exc:
-                        failures.append((request[0], request[1], exc))
-                        LOGGER.error(
-                            "Could not fetch %s for %s: %s",
-                            request[1],
-                            request[0],
-                            type(exc).__name__,
-                        )
+        LOGGER.info(
+            "Fetching %d source responses for %s through %s with %d workers.",
+            len(batch),
+            min(dates),
+            max(dates),
+            min(workers, len(batch)),
+        )
+        with ThreadPoolExecutor(max_workers=min(workers, len(batch))) as pool:
+            futures = [(request, pool.submit(fetch, request)) for request in batch]
+            rows = []
+            for request, future in futures:
+                try:
+                    row = future.result()
+                    if row is not None and existing_payloads.get(row[:2]) != row[2]:
+                        rows.append(row)
+                except Exception as exc:
+                    failures.append((request[0], request[1], exc))
+                    LOGGER.error(
+                        "Could not fetch %s for %s: %s",
+                        request[1],
+                        request[0],
+                        type(exc).__name__,
+                    )
 
-            if not rows:
-                continue
-            ingested_at = datetime.now(UTC)
-            spark.createDataFrame(
-                [
-                    (delivery_date, series, payload, ingested_at)
-                    for delivery_date, series, payload in rows
-                ],
-                SCHEMA,
-            ).write.format("delta").mode("append").saveAsTable(TABLE)
-            written += len(rows)
-            LOGGER.info("Appended %d raw responses to %s.", len(rows), TABLE)
+        if not rows:
+            continue
+        ingested_at = datetime.now(UTC)
+        spark.createDataFrame(
+            [
+                (delivery_date, series, payload, ingested_at)
+                for delivery_date, series, payload in rows
+            ],
+            SCHEMA,
+        ).write.format("delta").mode("append").saveAsTable(TABLE)
+        written += len(rows)
+        LOGGER.info("Appended %d raw responses to %s.", len(rows), TABLE)
     if failures:
         details = ", ".join(
             f"{series} on {delivery_date} ({type(exc).__name__})"
@@ -382,6 +400,9 @@ def main() -> None:
     parser.add_argument("--start", help="First delivery date, including lagged inputs")
     parser.add_argument("--end", help="Last delivery date; defaults to tomorrow")
     parser.add_argument("--workers", type=int, default=WORKERS)
+    parser.add_argument(
+        "--refresh", nargs="?", choices=("true", "false"), const="true", default="false"
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
@@ -390,6 +411,7 @@ def main() -> None:
         start=date.fromisoformat(args.start) if args.start else None,
         end=date.fromisoformat(args.end) if args.end else None,
         workers=args.workers,
+        refresh=args.refresh == "true",
     )
 
 

@@ -11,6 +11,11 @@ DELU publishes 96 quarter-hour prices and 90% prediction intervals for each
 Germany-Luxembourg Single Day-Ahead Coupling (SDAC) delivery day. It does not
 forecast a physical real-time or imbalance price.
 
+The current model-data contract is version 2. It includes interval-aligned
+shortwave radiation and explicit `D-1` forecast feature names. Prediction rejects
+models trained on another data version, so the corrected history and model are
+released together.
+
 The point model learns a correction to the earlier DE-LU EXAA auction:
 
 ```text
@@ -49,18 +54,22 @@ flowchart LR
 
 | Stage | Unity Catalog object | Grain | Responsibility |
 | :--- | :--- | :--- | :--- |
-| Bronze | `delu.bronze.raw` | One raw response per source date and series | Download, validate, retry, and append ENTSO-E XML or weather JSON without transforming it |
-| Silver | `delu.silver.measurements` | One timestamped value per series | Keep the latest raw response, parse values and units, and overwrite the typed long-form table |
+| Bronze | `delu.bronze.raw` | One raw response version per source date and series | Download, validate, retry, and append ENTSO-E XML or weather JSON without transforming it |
+| Silver | `delu.silver.measurements` | One physical timestamped value per series | Keep the latest raw response, parse values and units, and overwrite the typed long-form table |
+| Calendar | `delu.silver.holidays` | One date with DE and LU holiday flags | Cache validated calendar dates, including non-holidays, for reuse by Gold |
 | Gold | `delu.gold.model_input` | One row per delivery day and wall-clock quarter | Align source dates, normalize every day to 96 quarters, pivot features, and retain a nullable SDAC target |
 | Model | `delu.ml.sdac_cqr` | One registered model version | Store MLflow candidates and the promoted `@prod` model |
 | Prediction | `delu.gold.forecasts` | One row per delivery day and quarter | Store point and interval forecasts idempotently |
-| Prediction run | `delu.gold.forecast_runs` | One row per delivery day | Store model version and input/output drift diagnostics |
-| Evaluation | `delu.gold.forecast_metrics` | One row per delivery day | Store settled accuracy, interval, baseline, and monitoring results |
+| Prediction run | `delu.gold.forecast_runs` | One row per delivery day | Store model and Gold versions plus input/output drift diagnostics |
+| Evaluation | `delu.gold.forecast_metrics` | One row per delivery day | Store physical and normalized accuracy, interval, baseline, and monitoring results |
 
 Silver and Gold rebuild their derived tables from validated Bronze responses.
 Missing inputs stay pending; a run with no complete data preserves the existing
 output. Bronze is durable: subsequent runs fetch only missing source keys and
-rebuild the downstream state.
+rebuild the downstream state. A bounded `--refresh true --start ... --end ...`
+run re-fetches accepted keys and appends only changed source payloads. Evaluation
+then recomputes from the repaired start date through the latest eligible settlement
+so later rolling metrics remain consistent.
 
 ## Processing and retries
 
@@ -82,12 +91,14 @@ and [Free Edition limits](https://docs.databricks.com/aws/en/getting-started/fre
 
 - Valid source responses are retained even when another API is unavailable.
 - Missing, incomplete, rate-limited, and temporarily unavailable source responses
-  are retried on subsequent runs, with two concurrent requests per source.
+  are retried on subsequent runs, with two concurrent requests.
+  Malformed responses fail the task. Newest source dates are attempted first.
 - Gold publishes complete feature days; missing days do not block ready days.
 - Predictions can be published or backfilled at any time. Existing published
-  values and timestamps are preserved.
-- Evaluation waits for actual prices and includes every stored forecast in
-  monitoring. Model drift is recorded without failing the data job.
+  values and timestamps are preserved. Each result is classified as operational
+  or retrospective at the `D-1` 12:00 Europe/Berlin decision cutoff.
+- Evaluation waits for actual prices. Only operational forecasts enter rolling
+  monitoring; retrospective reconstructions retain accuracy metrics separately.
 - Authentication, configuration, and unexpected programming errors remain visible
   failures. Downstream tasks can still process previously available data.
 
@@ -108,7 +119,7 @@ six are cyclical encodings derived during loading.
 | :--- | ---: | :--- | :--- |
 | EXAA prices | 2 | DE-LU and Austrian EXAA curves for `D` | Fetched when the source publishes the curve |
 | SDAC price lags | 3 | DE-LU SDAC curves for `D-1`, `D-2`, and `D-7` | Previously published outcomes |
-| Load and generation forecasts | 5 | Four ENTSO-E forecast curves sourced for `D-1`, plus derived residual load | Shifted forward one day in Gold; these are lagged curves, not forecasts describing `D` |
+| Load and generation forecasts | 5 | Four ENTSO-E forecast curves sourced for `D-1`, plus derived residual load | Shifted forward one day in Gold; `*_forecast_delivery_d_minus_1_mw` names make clear that these curves describe `D-1`, not `D` |
 | Load and generation actuals | 5 | Four actual curves from `D-2`, plus derived residual load | Shifted forward two days in Gold |
 | Weather forecasts | 125 | Five fields at 25 locations, valid on `D` | Open-Meteo model run from `D-1` 00:00 UTC |
 | Calendar | 9 | Weekend and holiday flags plus quarter, weekday, and month cycles | Deterministic from `D` and holiday calendars |
@@ -125,8 +136,10 @@ season columns.
 ### Weather handling
 
 Bronze requests 48 hours from the `D-1` 00:00 UTC model run. Silver retains only
-timestamps whose Berlin local date is `D`; Gold expands the hourly values across
-the 96 quarter positions. The five fields are temperature at 2 m, wind speed and
+hours represented on Berlin delivery day `D`; Gold expands the hourly values
+across the 96 quarter positions. Open-Meteo shortwave radiation is a
+preceding-hour mean, so Silver moves its timestamp back one hour before selecting
+the delivery day. The five fields are temperature at 2 m, wind speed and
 direction at 100 m, shortwave radiation, and cloud cover.
 
 The API determines availability. There is no 09:00 Europe/Berlin gate: an available
@@ -145,21 +158,30 @@ references, and the distinction between per-location model inputs and the
 
 - Bronze validates each payload before writing it. ENTSO-E curves must have the
   expected currency, units, 15-minute resolution, finite values, and complete
-  delivery-day coverage. Weather must have the expected locations, units, and 48
-  consecutive hourly timestamps.
+  delivery-day coverage. A03 values are forward-filled only within their
+  published `Period`; they are never extended into unpublished hours. Weather
+  must have the expected locations, units, and 48 consecutive hourly timestamps.
 - Silver selects the latest response for each source date and series. It stores
   UTC timestamps, while `delivery_date` remains the Berlin market date.
-- Before Gold builds, Spark checks that Silver contains no null or
-  NaN measurements. Absent sources leave their dependent days pending.
+- Before Gold builds, Spark checks that Silver contains no non-finite values,
+  duplicate keys, missing timestamps, or misaligned timestamps. Every available
+  electricity series must match the exact 92, 96, or 100-quarter UTC grid, and
+  every weather series the exact 23, 24, or 25-hour grid. Absent whole sources
+  leave their dependent days pending. The only source exception is the verified
+  96-quarter suffix published for solar and onshore-wind forecasts on the autumn
+  overlap: Silver preserves those 96 observations and Gold fills only their four
+  absent leading model slots from the first published value.
 - Gold drops rows with incomplete features, requires 96 quarters per retained day,
   and permits missing targets during prediction.
 - Model loading rejects duplicate quarters, incomplete days, and non-finite
   features or targets. Training requires complete targets; prediction does not.
 
 Gold deliberately maps every local day to 96 wall-clock quarters. On daylight
-saving transitions, repeated local quarters are averaged and missing quarters are
-filled from adjacent values. This gives the estimator a fixed tensor shape, but it
-is a modeling normalization rather than the physical 92- or 100-interval day.
+saving transitions, repeated scalar quarters are averaged, repeated wind
+directions use a circular mean, and the known spring clock gap is filled from
+adjacent values. An undefined circular mean is rejected. This gives the estimator
+a fixed tensor shape, but it is a modeling normalization rather than the physical
+92- or 100-interval day.
 
 ## Model lifecycle
 
@@ -191,17 +213,22 @@ registered with its blocking reasons but does not replace production.
 
 Prediction loads a complete Gold day, resolves the MLflow `@prod` version,
 validates all 96 point and interval outputs, and stores them with their actual
-publication timestamp. The run record also captures feature outlier rate,
-maximum feature-mean z-score, and prediction-mean z-score. Repeated runs skip
-already published days.
+creation timestamp and `forecast_kind`. A result created no later than `D-1`
+12:00 Europe/Berlin is operational; a later or backfilled result is retrospective.
+The run record also captures the Gold Delta version, feature outlier rate, maximum
+feature-mean z-score, and prediction-mean z-score. Repeated runs skip already
+published days. Scheduled runs after the cutoff fail if tomorrow lacks an
+operational forecast, which uses the existing job failure notification.
 
 ### Evaluate
 
-Evaluation considers every complete 96-quarter stored forecast once Gold contains
-the complete SDAC curve. It records MAE, RMSE, bias, interval coverage, mean
-interval width, interval score, and EXAA and seven-day SDAC baselines. Publication
-time never excludes a forecast. When an older gap is filled, subsequent rolling
-metrics are recomputed in date order.
+Evaluation considers every complete 96-slot forecast once Gold contains the
+complete SDAC curve. Its primary MAE, RMSE, bias, interval coverage, mean interval
+width, interval score, and baselines compare the forecast with Silver's 92, 96, or
+100 physical delivery timestamps. It also records the same metrics with a
+`normalized_96_` prefix as model diagnostics. Repeated autumn quarters therefore
+contribute two physical errors, while nonexistent spring quarters contribute none.
+Only operational results enter rolling metrics and drift monitoring.
 
 ### Backfill
 
@@ -211,8 +238,9 @@ predictions, and evaluates them. Without a range it searches all source history,
 fills prediction gaps from the first stored forecast (or the model's registration
 date on first use), and checks all stored forecasts for missing evaluations.
 Backfilled predictions use the current production model and their real creation
-timestamps. They are not a replacement for chronological held-out model testing.
-There is no separate recovery job or age limit on missing data.
+timestamps. They are classified as retrospective and never enter operational
+rolling metrics. They are not a replacement for chronological held-out model
+testing. There is no separate recovery job or age limit on missing data.
 
 ## Public read caching
 

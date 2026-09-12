@@ -261,6 +261,7 @@ class SqlForecastStore:
               (SELECT model_version FROM {self.settings.forecast_run_table}
                  ORDER BY delivery_date DESC LIMIT 1) AS model_version,
               (SELECT monitoring_status FROM {self.settings.metrics_table}
+                 WHERE forecast_kind = 'operational'
                  ORDER BY delivery_date DESC LIMIT 1) AS monitoring_status
             """,
             max_age_seconds=_HEALTH_CACHE_SECONDS,
@@ -309,13 +310,18 @@ class SqlForecastStore:
         return self._query(
             f"""
             SELECT f.delivery_date, f.quarter_of_day, f.model_version,
-                   f.predicted_at, f.nominal_coverage,
+                   f.predicted_at, f.forecast_kind, f.nominal_coverage,
                    f.predicted_price_eur_per_mwh,
                    f.lower_price_eur_per_mwh,
                    f.upper_price_eur_per_mwh,
                    g.price_de_lu_sdac_eur_per_mwh AS actual_price_eur_per_mwh,
                    m.mae, m.rmse, m.picp, m.mpiw, m.interval_score, m.bias,
                    m.baseline_exaa_mae, m.baseline_7d_mae, m.evaluated_at,
+                   m.normalized_96_mae, m.normalized_96_rmse,
+                   m.normalized_96_picp, m.normalized_96_mpiw,
+                   m.normalized_96_interval_score, m.normalized_96_bias,
+                   m.normalized_96_baseline_exaa_mae,
+                   m.normalized_96_baseline_7d_mae,
                    m.monitoring_status, m.monitoring_reasons,
                    m.rolling_7d_mae, m.rolling_7d_baseline_exaa_mae,
                    m.rolling_28d_picp
@@ -341,11 +347,11 @@ class SqlForecastStore:
                    price_de_lu_sdac_lag_1d_eur_per_mwh,
                    price_de_lu_sdac_lag_2d_eur_per_mwh,
                    price_de_lu_sdac_lag_7d_eur_per_mwh,
-                   load_day_ahead_forecast_mw,
-                   solar_day_ahead_forecast_mw,
-                   wind_onshore_day_ahead_forecast_mw,
-                   wind_offshore_day_ahead_forecast_mw,
-                   residual_load_day_ahead_forecast_mw,
+                   load_forecast_delivery_d_minus_1_mw,
+                   solar_forecast_delivery_d_minus_1_mw,
+                   wind_onshore_forecast_delivery_d_minus_1_mw,
+                   wind_offshore_forecast_delivery_d_minus_1_mw,
+                   residual_load_forecast_delivery_d_minus_1_mw,
                    load_actual_d_minus_2_mw, solar_actual_d_minus_2_mw,
                    wind_onshore_actual_d_minus_2_mw,
                    wind_offshore_actual_d_minus_2_mw,

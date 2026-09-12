@@ -62,10 +62,11 @@ credentials kept on the server.
 | Data pipeline | 02:30, 10:30, 11:30, 13:30, and 15:30 Europe/Berlin | Fetches missing data, builds complete days, publishes missing forecasts, and evaluates available actual prices. |
 | Retraining | Monthly, day 3 at 06:00 Europe/Berlin | Evaluates a candidate model and promotes it if the quality checks pass. |
 
-Missing data stays pending. Each run retries the missing source responses across
-history, including gaps lasting several days. Existing forecasts keep their
-original values and publication timestamps. A delayed forecast is evaluated in
-the same way once its actual prices are available.
+Missing or incomplete data stays pending; malformed source data fails visibly.
+Each run tries the newest missing responses first, then historical gaps. Existing
+forecasts keep their original values and creation timestamps. Forecasts created
+after the `D-1` 12:00 Europe/Berlin cutoff are retrospective: they keep physical
+delivery accuracy metrics but do not enter operational rolling monitoring.
 
 If a scheduled run arrives while the pipeline is busy, Databricks queues it.
 One run writes the shared tables at a time. The next run checks the remaining
